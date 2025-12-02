@@ -1,6 +1,6 @@
 # Multi-stage build for Bento Flexprice
 # Stage 1: Build the Go binary
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -51,6 +51,6 @@ EXPOSE 4195
 # Set entrypoint
 ENTRYPOINT ["/app/bento-flexprice"]
 
-# Default command (can be overridden)
-CMD ["-c", "/app/examples/generate.yaml"]
+# Default command - use kafka config for production
+CMD ["-c", "/app/examples/kafka-test-flexprice.yaml"]
 

@@ -371,5 +371,4 @@ bento/
 ## Related
 
 - [Bento](https://github.com/warpstreamlabs/bento) - Open source stream processor (MIT license)
-- [OpenMeter Bento Plugin](https://github.com/openmeterio/openmeter) - Inspiration
 - [Flexprice](https://flexprice.io) - Usage-based billing

@@ -6,6 +6,8 @@
 *.test
 *.out
 benthos-flexprice
+bento-flexprice
+send-events
 
 # Config files (should be mounted or passed as env vars)
 .env

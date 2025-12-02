@@ -346,5 +346,4 @@ input:
 
 - **Docs:** [docs.flexprice.io](https://docs.flexprice.io)
 - **Bento Docs:** [warpstreamlabs.github.io/bento](https://warpstreamlabs.github.io/bento)
-- **Email:** support@flexprice.io
 

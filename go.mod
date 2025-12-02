@@ -1,4 +1,4 @@
-module github.com/flexprice/flexprice/benthos
+module github.com/flexprice/bento-collector
 
 go 1.25
 

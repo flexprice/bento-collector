@@ -31,7 +31,7 @@ func main() {
 	brokers := os.Getenv("FLEXPRICE_KAFKA_BROKERS")
 	user := os.Getenv("FLEXPRICE_KAFKA_SASL_USER")
 	password := os.Getenv("FLEXPRICE_KAFKA_SASL_PASSWORD")
-	topic := "benthos-testing"
+	topic := "bento-testing"
 
 	if brokers == "" || user == "" || password == "" {
 		log.Fatal("❌ Missing required environment variables:\n" +

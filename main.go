@@ -9,7 +9,7 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/all"
 
 	// Import custom Flexprice output plugin
-	_ "github.com/flexprice/flexprice/benthos/output"
+	_ "github.com/flexprice/bento-collector/output"
 )
 
 func main() {

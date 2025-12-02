@@ -9,7 +9,7 @@ input:
     
     # Test topic (configurable via environment)
     topics:
-      - ${FLEXPRICE_KAFKA_TOPIC:benthos-testing}
+      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
     
     # Consumer group (use a new group name to skip old messages)
     consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-flexprice-v3}
