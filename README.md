@@ -1,248 +1,134 @@
 # Bento Flexprice Collector
 
-Custom Bento distribution for streaming usage events to Flexprice from any data source (Kafka, databases, APIs, etc.).
+A custom [Bento](https://github.com/warpstreamlabs/bento) distribution that enables streaming usage events to [Flexprice](https://flexprice.io) from **any data source** — Kafka, databases, HTTP APIs, files, and [200+ more connectors](https://warpstreamlabs.github.io/bento/docs/components/inputs/about).
 
-> **Note**: This project uses [Bento](https://github.com/warpstreamlabs/bento), an open-source stream processor (MIT license), ensuring complete freedom without vendor restrictions.
+Built on the official Flexprice Go SDK, this collector handles event transformation, batching, retries, and dead-letter queues out of the box.
+
+> **Open Source**: Uses [Bento](https://github.com/warpstreamlabs/bento) (MIT license) — no vendor lock-in.
 
 ## Features
 
-- ✅ **Flexprice Output Plugin** - Uses official Flexprice Go SDK
-- ✅ **Kafka Consumer** - Stream from Kafka (with SASL/TLS support)
-- ✅ **Event Generator** - Create synthetic events for testing
-- ✅ **Bloblang Transforms** - Transform events on-the-fly
-- ✅ **Docker Ready** - Production-ready container
+- **Flexprice Output Plugin** — Uses official Flexprice Go SDK for reliable event ingestion
+- **Any Input Source** — Kafka, PostgreSQL, HTTP, S3, and 200+ connectors
+- **Bloblang Transforms** — Transform and enrich events on-the-fly
+- **Built-in Reliability** — Retry logic, batching, and dead-letter queue support
+- **Docker Ready** — Production-ready container included
+
+---
 
 ## Quick Start
 
 ### 1. Build the Binary
 
 ```bash
-cd bento
 go build -o bento-flexprice main.go
 ```
 
 ### 2. Set Environment Variables
 
+Copy the example environment file and configure your Flexprice credentials:
+
 ```bash
-export FLEXPRICE_API_HOST=api.cloud.flexprice.io
-export FLEXPRICE_API_KEY=your_api_key_here
+cp env.example .env
+```
+
+Edit `.env` with your Flexprice API credentials (see [env.example](env.example)):
+
+```bash
+# Required for Quick Start
+FLEXPRICE_API_HOST=api.cloud.flexprice.io
+FLEXPRICE_API_KEY=your_api_key_here
+```
+
+Then load the environment:
+
+```bash
+source .env
 ```
 
 ### 3. Run an Example
 
-```bash
-# Generate random events (for testing)
-./bento-flexprice -c examples/generate.yaml
+**Example 1: Generate Dummy Events → Flexprice**
 
-# Consume from Kafka
-./bento-flexprice -c examples/kafka-consumer.yaml
+The simplest way to test — generates random events and sends them directly to Flexprice:
+
+```bash
+./bento-flexprice -c examples/dummy-events-to-flexprice.yaml
 ```
+
+**Example 2: Kafka → Flexprice (with Dead Letter Queue)**
+
+Production-ready example that consumes from Kafka, transforms events, and sends to Flexprice with automatic retries and DLQ for failed events:
+
+```bash
+# First, generate test events to Kafka
+./bento-flexprice -c examples/kafka/generate-to-kafka.yaml
+
+# Then consume and send to Flexprice (with DLQ support)
+./bento-flexprice -c examples/kafka/consume-from-kafka-with-dlq.yaml
+```
+
+---
 
 ## Event Format
 
-Events must be JSON with these fields:
+Events must be JSON with these fields (see [Flexprice Ingest Event API](https://docs.flexprice.io/api-reference/events/ingest-event#ingest-event)):
 
 ```json
 {
-  "event_name": "feature 1",               // Required: meter name
-  "external_customer_id": "cust_123",      // Required: customer ID
-  "properties": {                          // Optional: event data
-    "feature 1": 100,                      // Use numbers for aggregation
-    "metadata": "value"
+  "event_name": "api_request",            // Required: must match a meter name
+  "external_customer_id": "cust_123",     // Required: customer ID
+  "properties": {                         // Optional: event data for aggregation
+    "tokens": 100,
+    "model": "gpt-4"
   },
-  "timestamp": "2025-12-01T10:30:00Z",     // Optional: defaults to now
-  "source": "kafka-stream",                // Optional: event source
-  "event_id": "evt_123"                    // Optional: unique ID
+  "timestamp": "2025-12-01T10:30:00Z",    // Optional: defaults to now
+  "source": "kafka-stream",               // Optional: event source identifier
+  "event_id": "evt_123"                   // Optional: unique event ID
 }
 ```
 
-**⚠️ SDK Note:** Due to SDK limitations, numeric property values must be converted to strings in your Bloblang transform using `"%v".format(this.value)` - the API will convert them back to numbers for aggregation.
+**⚠️ SDK Note:** Numeric property values must be converted to strings in your Bloblang transform using `.string()` or `"%v".format(this.value)` — the Flexprice API will convert them back to numbers for aggregation.
 
-## Configuration
+---
 
-### Flexprice Output
+## Examples
 
-```yaml
-output:
-  flexprice:
-    api_host: ${FLEXPRICE_API_HOST}     # api.cloud.flexprice.io
-    api_key: ${FLEXPRICE_API_KEY}       # Your API key
-    scheme: https                        # http or https
-```
+| Example | Description | Command |
+|---------|-------------|---------|
+| [dummy-events-to-flexprice.yaml](examples/dummy-events-to-flexprice.yaml) | Generate dummy events → Flexprice | `./bento-flexprice -c examples/dummy-events-to-flexprice.yaml` |
+| [generate-to-kafka.yaml](examples/kafka/generate-to-kafka.yaml) | Generate events → Kafka | `./bento-flexprice -c examples/kafka/generate-to-kafka.yaml` |
+| [consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Kafka → Flexprice (simple) | `./bento-flexprice -c examples/kafka/consume-from-kafka.yaml` |
+| [consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Kafka → Flexprice (with DLQ) | `./bento-flexprice -c examples/kafka/consume-from-kafka-with-dlq.yaml` |
 
-### Kafka Input (Local)
-
-```yaml
-input:
-  kafka:
-    addresses: 
-      - localhost:29092
-    topics:
-      - events
-    consumer_group: bento-flexprice
-    start_from_oldest: true
-```
-
-### Kafka Input (Confluent Cloud)
-
-```yaml
-input:
-  kafka:
-    addresses: 
-      - ${KAFKA_BROKERS}
-    topics:
-      - your-topic
-    consumer_group: bento-flexprice
-    start_from_oldest: false
-    
-    # Enable TLS
-    tls:
-      enabled: true
-    
-    # SASL authentication
-    sasl:
-      mechanism: PLAIN
-      user: ${KAFKA_SASL_USER}
-      password: ${KAFKA_SASL_PASSWORD}
-```
-
-## Real-World Example: Staging Kafka
-
-Here's how to stream from a production Kafka to Flexprice:
-
-**1. Create `.env.staging` file:**
+### Kafka Testing Flow
 
 ```bash
-# Flexprice
-export FLEXPRICE_API_HOST=api.cloud.flexprice.io
-export FLEXPRICE_API_KEY=fp_xxx
+# Step 1: Generate test events to Kafka
+./bento-flexprice -c examples/kafka/generate-to-kafka.yaml
 
-# Kafka (Confluent Cloud)
-export FLEXPRICE_KAFKA_BROKERS=pkc-xxx.us-east-1.aws.confluent.cloud:9092
-export FLEXPRICE_KAFKA_SASL_USER=your_user
-export FLEXPRICE_KAFKA_SASL_PASSWORD=your_password
-export FLEXPRICE_KAFKA_CONSUMER_GROUP=bento-flexprice-prod
+# Step 2: Consume from Kafka and send to Flexprice
+./bento-flexprice -c examples/kafka/consume-from-kafka.yaml
+
+# Or with Dead Letter Queue support (recommended for production)
+./bento-flexprice -c examples/kafka/consume-from-kafka-with-dlq.yaml
 ```
 
-**2. Load and run:**
+> **Note:** Create Kafka topics as per config files to ensure you're reading from and writing to the correct cluster.
 
-```bash
-source .env.staging
-./bento-flexprice -c examples/kafka-staging.yaml
-```
-
-**3. Send test events:**
-
-```bash
-# Build the event sender
-go build -o send-events send-events.go
-
-# Send 10 events to Kafka
-./send-events 10
-```
-
-**Expected logs:**
-
-```
-INFO[...] Flexprice output connected and ready
-INFO[...] Input type kafka is now active
-INFO[...] [KAFKA→FLEXPRICE] Processing event:
-- Event Name: feature 1
-- Customer ID: cust_01KB01JF360SNFB2EX7KRFHX0N
-INFO[...] 📤 Sending event: feature 1 for customer: cust_...
-INFO[...] ✅ Event accepted successfully, ID: real-test-1764619426582
-```
-
-## Error Handling
-
-| Status Code | Behavior |
-|-------------|----------|
-| **202 Accepted** | ✅ Success - event accepted |
-| **400 Bad Request** | ❌ Dropped - validation error |
-| **401/403 Unauthorized** | 🛑 Stop - auth failed |
-| **429 Rate Limited** | 🔄 Retry with backoff |
-| **5xx Server Error** | 🔄 Retry with backoff |
-| **Network Error** | 🔄 Retry with backoff |
-
-## Bloblang Transformations
-
-Transform events before sending to Flexprice:
-
-```yaml
-pipeline:
-  processors:
-    - mapping: |
-        # Map your format to Flexprice format
-        root.event_name = this.eventType
-        root.external_customer_id = this.userId
-        
-        # Convert ALL property values to strings for SDK compatibility
-        root.properties = this.data.map_each(kv -> {
-          kv.key: "%v".format(kv.value)
-        })
-        
-        # Add source tracking
-        root.source = "my-service"
-        
-        # Use current timestamp if missing
-        root.timestamp = this.timestamp.or(now().format_timestamp("2006-01-02T15:04:05Z07:00"))
-```
-
-## Testing
-
-### Test 1: Generate Random Events
-
-```bash
-./bento-flexprice -c examples/generate.yaml
-```
-
-Generates 100 random events and sends to Flexprice.
-
-### Test 2: Kafka → Flexprice
-
-**Start local Kafka (from repo root):**
-
-```bash
-docker-compose up -d kafka
-```
-
-**Send test event:**
-
-```bash
-docker exec -it flexprice-kafka-1 kafka-console-producer \
-  --broker-list localhost:9092 \
-  --topic events
-
-# Paste this (then Ctrl+D):
-{"event_name":"api.request","external_customer_id":"cust_123","properties":{"endpoint":"/api/users","count":5}}
-```
-
-**Run Bento:**
-
-```bash
-export KAFKA_BROKER=localhost:29092
-export KAFKA_TOPIC=events
-./bento-flexprice -c examples/kafka-consumer.yaml
-```
-
-### Test 3: Docker
-
-```bash
-docker build -t bento-flexprice .
-
-docker run --rm \
-  -e FLEXPRICE_API_HOST=api.cloud.flexprice.io \
-  -e FLEXPRICE_API_KEY=your_key \
-  bento-flexprice:latest
-```
+---
 
 ## Monitoring
 
 Bento exposes metrics on port **4195**:
 
-- **Metrics**: `http://localhost:4195/metrics` (Prometheus)
-- **Health**: `http://localhost:4195/ping`
-- **Stats**: `http://localhost:4195/stats`
+| Endpoint | Description |
+|----------|-------------|
+| `http://localhost:4195/metrics` | Prometheus metrics |
+| `http://localhost:4195/ping` | Health check |
+| `http://localhost:4195/stats` | Runtime statistics |
+
+---
 
 ## Troubleshooting
 
@@ -252,20 +138,20 @@ Bento exposes metrics on port **4195**:
 
 ```bash
 # In Bento logs, look for:
-INFO[...] 📤 Sending event: feature 1 for customer: cust_...
+INFO[...] 📤 Sending event: api_request for customer: cust_...
 ```
 
 The `event_name` must match a meter's `event_name` in Flexprice.
 
-**Check 2: Properties are numbers (for aggregation)**
+**Check 2: Properties format**
 
-If your meter does `SUM` of a property, send it as a number:
+If your meter aggregates a property (e.g., `SUM`), the value should be numeric in the original event:
 
 ```json
 {
-  "event_name": "feature 1",
+  "event_name": "api_request",
   "properties": {
-    "feature 1": 100    // ✅ Number (not "100")
+    "tokens": 100    // ✅ Number in source (converted to string by transform)
   }
 }
 ```
@@ -288,14 +174,14 @@ ERROR[...] Failed to send event: 400 Bad Request
 
 ### Kafka not connecting
 
+**Confluent Cloud:**
+- Verify `FLEXPRICE_KAFKA_BROKERS` includes the port (`:9092`)
+- Check SASL credentials are correct
+- Ensure TLS is enabled in config
+
 **Local Kafka:**
 - Use `localhost:29092` (from host) or `kafka:9092` (from Docker)
 - Check topic exists: `kafka-topics --list --bootstrap-server localhost:29092`
-
-**Confluent Cloud:**
-- Verify `FLEXPRICE_KAFKA_BROKERS` has the full hostname with `:9092`
-- Check SASL credentials are correct
-- Ensure TLS is enabled in config
 
 ### Build errors
 
@@ -305,50 +191,56 @@ go mod tidy
 go build -o bento-flexprice main.go
 ```
 
+---
+
 ## Project Structure
 
 ```
-bento/
-├── main.go                    # Entry point (imports custom plugin)
+bento-collector/
+├── main.go                              # Entry point
 ├── output/
-│   └── flexprice.go          # Custom Flexprice output plugin
+│   └── flexprice.go                     # Custom Flexprice output plugin
 ├── examples/
-│   ├── generate.yaml         # Random event generator
-│   ├── kafka-consumer.yaml   # Local Kafka example
-│   └── kafka-staging.yaml    # Production Kafka (SASL+TLS)
-├── send-events.go            # Kafka event sender (for testing)
-├── Dockerfile                # Production container
-├── env.example               # Environment template
-└── README.md                 # This file
+│   ├── dummy-events-to-flexprice.yaml   # Direct: Generate → Flexprice
+│   └── kafka/
+│       ├── generate-to-kafka.yaml       # Generate → Kafka
+│       ├── consume-from-kafka.yaml      # Kafka → Flexprice
+│       └── consume-from-kafka-with-dlq.yaml  # Kafka → Flexprice (with DLQ)
+├── Dockerfile                           # Production container
+├── env.example                          # Environment template
+└── README.md
 ```
+
+---
 
 ## How It Works
 
 ```
-┌───────────┐
-│   Kafka   │  Your event source
-│  (or any  │  (database, API, file, etc.)
-│   input)  │
-└─────┬─────┘
-      │
-      v
-┌───────────┐
-│ Bloblang  │  Transform to Flexprice format
-│ Transform │  (optional)
-└─────┬─────┘
-      │
-      v
-┌───────────┐
-│ Flexprice │  Custom output plugin
-│  Output   │  (uses Go SDK)
-└─────┬─────┘
-      │
-      v
-┌───────────┐
-│ Flexprice │  Usage data appears in UI
-│    API    │
-└───────────┘
+┌───────────────┐
+│  Any Input    │  Kafka, PostgreSQL, HTTP, S3, etc.
+│   Source      │
+└───────┬───────┘
+        │
+        v
+┌───────────────┐
+│   Bloblang    │  Transform to Flexprice format
+│   Transform   │  (convert properties to strings)
+└───────┬───────┘
+        │
+        v
+┌───────────────┐
+│   Flexprice   │  Custom output plugin
+│    Output     │  (batching, retries, DLQ)
+└───────┬───────┘
+        │
+        v
+┌───────────────┐
+│  Flexprice    │  Usage data in dashboard
+│     API       │
+└───────────────┘
 ```
+
+---
 
 ## Environment Variables Reference
 
@@ -356,19 +248,27 @@ bento/
 |----------|-------------|---------|
 | `FLEXPRICE_API_HOST` | Flexprice API host | `api.cloud.flexprice.io` |
 | `FLEXPRICE_API_KEY` | API key | `fp_xxx` |
-| `KAFKA_BROKER` | Kafka broker (local) | `localhost:29092` |
-| `KAFKA_TOPIC` | Topic name | `events` |
-| `FLEXPRICE_KAFKA_BROKERS` | Kafka brokers (cloud) | `pkc-xxx.aws.confluent.cloud:9092` |
+| `FLEXPRICE_KAFKA_BROKERS` | Kafka brokers | `pkc-xxx.confluent.cloud:9092` |
+| `FLEXPRICE_KAFKA_TOPIC` | Kafka topic | `events` |
 | `FLEXPRICE_KAFKA_SASL_USER` | SASL username | From Confluent Cloud |
 | `FLEXPRICE_KAFKA_SASL_PASSWORD` | SASL password | From Confluent Cloud |
+| `FLEXPRICE_KAFKA_CONSUMER_GROUP` | Consumer group | `bento-flexprice-v1` |
+| `FLEXPRICE_KAFKA_DLQ_TOPIC` | Dead letter queue topic | `events-dlq` |
+
+See [env.example](env.example) for the complete list.
+
+---
 
 ## Support
 
-- **Documentation**: [docs.flexprice.io](https://docs.flexprice.io)
-- **Issues**: [GitHub Issues](https://github.com/flexprice/flexprice/issues)
+- **Flexprice Docs**: [docs.flexprice.io](https://docs.flexprice.io)
+- **Flexprice API Reference**: [Event Ingestion](https://docs.flexprice.io/api-reference/events/ingest-event)
 - **Bento Docs**: [warpstreamlabs.github.io/bento](https://warpstreamlabs.github.io/bento/)
+- **Issues**: [GitHub Issues](https://github.com/flexprice/flexprice/issues)
+
+---
 
 ## Related
 
-- [Bento](https://github.com/warpstreamlabs/bento) - Open source stream processor (MIT license)
-- [Flexprice](https://flexprice.io) - Usage-based billing
+- [Bento](https://github.com/warpstreamlabs/bento) — Open source stream processor (MIT license)
+- [Flexprice](https://flexprice.io) — Usage-based billing platform
