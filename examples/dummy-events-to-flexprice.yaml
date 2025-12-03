@@ -4,7 +4,7 @@
 input:
   generate:
     interval: 100ms  # Generate one event every 100ms
-    count: 100       # Total events to generate
+    count: 10        # Total events to generate
     mapping: |
       # Generate random event data using Bloblang
       root.event_name = "api.request"
@@ -21,14 +21,26 @@ input:
 
 pipeline:
   processors:
+    # Convert all property values to strings (Flexprice SDK requirement)
+    - mapping: |
+        root = this
+        
+        # Properties - ensure all values are strings (required by Flexprice SDK)
+        root.properties = if this.properties.type() == "object" {
+          this.properties.map_each(p -> p.value.string())
+        } else {
+          {}
+        }
+    
     # Log each event being sent
     - log:
         level: INFO
         message: |
-          Sending event: ${!json("event_name")}
-          Customer: ${!json("external_customer_id")}
-          Endpoint: ${!json("properties.endpoint")}
-          Status: ${!json("properties.status_code")}
+          [GENERATOR→FLEXPRICE] Sending event:
+          - Event Name: ${!json("event_name")}
+          - Customer ID: ${!json("external_customer_id")}
+          - Endpoint: ${!json("properties.endpoint")}
+          - Status: ${!json("properties.status_code")}
 
 output:
   flexprice:
@@ -37,8 +49,7 @@ output:
     api_key: ${FLEXPRICE_API_KEY}
     scheme: ${FLEXPRICE_SCHEME:https}
 
-# Optional: Metrics configuration
-metrics:
-  prometheus:
-    prefix: bento_flexprice
-
+logger:
+  level: INFO
+  format: logfmt
+  add_timestamp: true

@@ -1,0 +1,72 @@
+# Bento Flexprice - Generate Random Events to Kafka
+# This configuration generates synthetic usage events and sends them to Kafka
+# The events are formatted to match what kafka-test-flexprice.yaml expects
+
+input:
+  generate:
+    interval: 100ms # Generate one event every 100ms
+    count: 10 # Total events to generate
+    mapping: |
+      # Generate random event data using Bloblang
+      # Format matches what kafka-test-flexprice.yaml expects (before transformation)
+      root.event_name = "api.request"
+      root.external_customer_id = "cust_" + uuid_v4().slice(0, 8)
+
+      # Properties as object (will be stringified by consumer)
+      root.properties = {
+        "endpoint": ["/api/users", "/api/orders", "/api/products"].index(random_int(max: 2)),
+        "method": ["GET", "POST", "PUT", "DELETE"].index(random_int(max: 3)),
+        "status_code": [200, 201, 204, 400, 404, 500].index(random_int(max: 5)),
+        "response_time_ms": random_int(min: 10, max: 500),
+        "user_agent": "bento-generator/1.0"
+      }
+
+      # Timestamp (optional - consumer will default if missing)
+      root.timestamp = now().format_timestamp("2006-01-02T15:04:05Z07:00")
+
+      # Optional fields
+      root.event_id = uuid_v4()
+      root.customer_id = "cust_" + uuid_v4().slice(0, 8)
+
+pipeline:
+  processors:
+    # Log each event being sent
+    - log:
+        level: INFO
+        message: |
+          [GENERATOR→KAFKA] Generating event:
+          - Event Name: ${!json("event_name")}
+          - Customer ID: ${!json("external_customer_id")}
+          - Endpoint: ${!json("properties.endpoint")}
+          - Status: ${!json("properties.status_code")}
+
+output:
+  kafka:
+    # Same Kafka brokers as consumer
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    # Same topic as consumer
+    topic: ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    # SASL Authentication for Confluent Cloud (same as consumer)
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: PLAIN
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    # Client ID for producer
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-flexprice-generator}
+
+    # Batching for efficient message sending
+    batching:
+      count: 10 # Send bulk when we have 10 events
+      period: 1s # Or send after 1 second
+
+logger:
+  level: INFO
+  format: logfmt
+  add_timestamp: true

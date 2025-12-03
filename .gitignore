@@ -1,1 +1,5 @@
 .env.staging
+.env
+
+# binaries
+bento-flexprice
