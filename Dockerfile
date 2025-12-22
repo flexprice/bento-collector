@@ -52,5 +52,5 @@ EXPOSE 4195
 ENTRYPOINT ["/app/bento-flexprice"]
 
 # Default command - use kafka config for production
-CMD ["-c", "/app/examples/kafka-test-flexprice.yaml"]
+CMD ["-c", "/app/examples/dummy-events-to-flexprice.yaml"]
 

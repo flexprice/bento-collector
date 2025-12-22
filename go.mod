@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/flexprice/go-sdk v1.0.10
-	github.com/segmentio/kafka-go v0.4.49
+	github.com/joho/godotenv v1.5.1
 	github.com/warpstreamlabs/bento v1.12.1
 )
 
