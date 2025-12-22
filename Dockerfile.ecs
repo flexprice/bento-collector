@@ -1,0 +1,70 @@
+# Dockerfile.ecs
+# Optimized Dockerfile for AWS ECS deployment (ARM64)
+# syntax=docker/dockerfile:1.4
+
+ARG GO_VERSION=1.25.5
+ARG ALPINE_VERSION=3.23
+
+#####################################
+# 1) Builder stage
+#####################################
+FROM --platform=linux/arm64 golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates
+
+# Cache Go module downloads
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# Copy source code
+COPY . .
+
+# Build the binary with optimizations
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    go build -ldflags="-w -s" -trimpath \
+      -o bento-flexprice main.go
+
+#####################################
+# 2) Runtime stage
+#####################################
+FROM --platform=linux/arm64 alpine:${ALPINE_VERSION} AS runtime
+
+WORKDIR /app
+
+# Install ca-certificates for HTTPS requests
+RUN apk --no-cache add ca-certificates && \
+    rm -rf /var/cache/apk/*
+
+# Create non-root user for security
+RUN addgroup -g 1000 bento && \
+    adduser -D -u 1000 -G bento bento
+
+# Copy binary from builder
+COPY --from=builder /build/bento-flexprice /app/bento-flexprice
+
+# Copy example configurations (preserves directory structure including kafka/ subdirectory)
+COPY --from=builder /build/examples /app/examples
+COPY --from=builder /build/internal /app/internal
+
+# Change ownership to non-root user
+RUN chown -R bento:bento /app
+
+# Switch to non-root user
+USER bento
+
+# Expose Bento HTTP server port (if needed)
+EXPOSE 4195
+
+# Set entrypoint
+ENTRYPOINT ["/app/bento-flexprice"]
+
+# Default command - can be overridden in ECS task definition
+# Users can override this in ECS task definition to use different YAML configs
+CMD ["-c", "/app/examples/dummy-events-to-flexprice.yaml"]
+

@@ -1,0 +1,169 @@
+# Bento Flexprice - Kafka consumer to write raw events to S3
+# Reads events from Kafka and writes each payload as an S3 file in format:
+# <tenant_id>/<environment_id>/event_id.json
+
+input:
+  kafka:
+    # Staging Kafka brokers
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    # Test topic (configurable via environment)
+    topics:
+      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    # Consumer group (use a new group name to skip old messages)
+
+    consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-flexprice-s3-v1}
+
+    # Start from LATEST to read only new messages (set to true to start from oldest/beginning)
+    # IMPORTANT: If start_from_oldest: true and no messages at beginning, consumer will wait
+    # Try false first to consume new messages, then true to read historical messages
+    start_from_oldest: true
+
+    # SASL Authentication for Confluent Cloud
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: PLAIN
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    # Client ID
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-flexprice-collector}
+
+    # Performance tuning for batching
+    commit_period: 1s
+    max_processing_period: 100ms
+
+    # Fetch settings - get messages faster for batching
+    fetch_buffer_cap: 256 # Fetch up to 256 messages at once
+
+    # Allow multiple messages in-flight before committing offsets
+    # IMPORTANT: With batching enabled in the output, we need to allow many messages
+    # to be in-flight before committing. Otherwise, Kafka will wait for each batch
+    # to complete before reading the next message, causing slow consumption.
+    # 
+    # How it works:
+    # - Kafka reads messages and sends them through the pipeline
+    # - Messages are batched in the S3 output (up to 100 messages or 2 seconds)
+    # - With checkpoint_limit: 1000, Kafka can read up to 1000 messages before
+    #   needing to commit offsets, allowing batching to work efficiently
+    checkpoint_limit: 1000
+
+# Rate Limiting Configuration (OPTIONAL)
+# ======================================
+# Choose ONE approach for controlling consumption speed:
+#
+# APPROACH 1: Rate Limiting (Precise control)
+#   - Provides exact rate control (e.g., exactly 10 events/second)
+#   - Good when: You need strict rate limits regardless of S3 speed
+#   - Overhead: Adds processor overhead, can create backpressure
+#   - To enable: Uncomment the rate_limits resource and rate_limit processor below
+#
+# APPROACH 2: max_in_flight (Recommended for S3)
+#   - Controls concurrent S3 uploads, naturally throttles consumption
+#   - Good when: S3 writes are I/O-bound (which they are)
+#   - Benefit: More efficient, allows parallel uploads, less overhead
+#   - Natural backpressure: S3 write speed naturally limits consumption
+#   - Configured in output section below
+#
+# According to Bento docs: "Increasing max_in_flight can improve throughput significantly"
+# Reference: https://warpstreamlabs.github.io/bento/docs/guides/performance_tuning
+
+# Uncomment to use rate limiting instead of max_in_flight
+# resources:
+  # rate_limits:
+  #   kafka_rate_limit:
+  #     local:
+  #       count: ${S3_RATE_LIMIT_COUNT:10} # Configurable: events per second (default: 10)
+  #       interval: 1s
+
+pipeline:
+  processors:
+    # Uncomment to use rate limiting (disables natural backpressure from max_in_flight)
+    # - rate_limit:
+    #     resource: kafka_rate_limit
+
+    # Parse JSON and filter: Skip events if tenant_id, environment_id, or id are missing
+    - mapping: |
+        # Preserve original event for potential DLQ
+        meta.original_event = this.string()
+        meta.original_topic = meta("kafka_topic")
+        meta.original_partition = meta("kafka_partition")
+        meta.original_offset = meta("kafka_offset")
+
+        tenant_id = this.tenant_id
+        environment_id = this.environment_id
+        event_id = this.id
+        
+        # Only process if all required fields are present and not empty
+        if this.tenant_id != null && this.tenant_id != "" && 
+           this.environment_id != null && this.environment_id != "" && 
+           this.id != null && this.id != "" {
+          # Pass through the parsed message (write payload as-is to S3)
+          root = this
+        } else {
+          # Drop message by setting to null
+          root = null
+        }
+
+    # Log each event being processed (only runs if message passed filter)
+    - log:
+        level: INFO
+        message: |
+          [KAFKA→S3] Processing event: Tenant ID: ${! this.tenant_id } | Environment ID: ${! this.environment_id } | Event ID: ${! this.id }
+output:
+  aws_s3:
+    bucket: ${FLEXPRICE_S3_BUCKET_NAME}
+    region: ${AWS_REGION:us-east-1}
+    
+    # Dynamic path: <tenant_id>/<environment_id>/event_id.json
+    path: ${! this.tenant_id }/${! this.environment_id }/${! this.id }.json
+    
+    # AWS Credentials Configuration
+    # =============================
+    # The AWS SDK uses the default credential provider chain when credentials are not provided.
+    # Credential resolution order:
+    # 1. Explicit credentials (if set below via environment variables)
+    # 2. Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN)
+    # 3. Default credential provider chain:
+    #    - ECS task role (when running on ECS)
+    #    - EC2 instance role (when running on EC2)
+    #    - Shared credentials file (~/.aws/credentials)
+    #
+    # Usage:
+    # - For ECS deployment: Leave credentials empty (or don't set env vars) to use ECS task role
+    # - For local/dev: Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables
+    #
+    # When credential fields are empty (default), AWS SDK automatically uses the default
+    # credential provider chain, which will pick up the ECS task role when deployed to ECS.
+    credentials:
+      id: ${AWS_ACCESS_KEY_ID:}      # Empty = use default provider chain (ECS task role)
+      secret: ${AWS_SECRET_ACCESS_KEY:} # Empty = use default provider chain (ECS task role)
+      token: ${AWS_SESSION_TOKEN:}     # Optional: for temporary credentials
+    
+    # Batching configuration - write multiple events in batches
+    # Batching improves S3 throughput significantly (see Bento performance tuning guide)
+    # With checkpoint_limit increased, Kafka can read many messages while batches are being formed
+    batching:
+      count: ${S3_BATCH_SIZE:100} # Send batch when we have 100 events
+      period: ${S3_BATCH_PERIOD:10s} # Or send after 10 seconds (whichever comes first)
+    
+    # Maximum concurrent S3 uploads (RECOMMENDED for rate control)
+    # ============================================================
+    # Controls how many messages can be uploaded to S3 concurrently
+    # Lower values = slower consumption, higher values = faster consumption
+    # 
+    # For ~10 events/second: Set to 10-20 (allows parallel uploads while limiting rate)
+    # Natural backpressure: When S3 is busy, consumption automatically slows down
+    # 
+    # This is more efficient than rate limiting for I/O-bound S3 operations
+    # Reference: https://warpstreamlabs.github.io/bento/docs/guides/performance_tuning
+    max_in_flight: ${S3_MAX_IN_FLIGHT:100}
+
+logger:
+  level: ${LOG_LEVEL:DEBUG}  # Set to DEBUG for troubleshooting, INFO for production
+  format: logfmt
+  add_timestamp: true
