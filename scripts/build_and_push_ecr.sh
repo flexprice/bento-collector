@@ -33,7 +33,16 @@ if [ -f .env ]; then
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         # Export valid environment variables
         if [[ "$line" =~ ^[[:alpha:]][[:alnum:]_]*= ]]; then
-            export "$line"
+            # Split key and value
+            key="${line%%=*}"
+            value="${line#*=}"
+            # Strip surrounding quotes (both single and double) from value
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+            # Export the cleaned variable
+            export "${key}=${value}"
         fi
     done < .env
 else

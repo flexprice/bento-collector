@@ -173,7 +173,7 @@ func (f *flexpriceOutput) sendSingleEvent(ctx context.Context, event flexprice.D
 		Execute()
 
 	if err != nil {
-		return f.handleAPIError(err, httpResp, "single event")
+		return f.handleAPIError(err, result, httpResp, "single event", &event, nil)
 	}
 
 	// Check for successful response
@@ -205,7 +205,7 @@ func (f *flexpriceOutput) sendBulkEvents(ctx context.Context, events []flexprice
 		Execute()
 
 	if err != nil {
-		return f.handleAPIError(err, httpResp, fmt.Sprintf("bulk batch (%d events)", len(events)))
+		return f.handleAPIError(err, result, httpResp, fmt.Sprintf("bulk batch (%d events)", len(events)), nil, bulkRequest)
 	}
 
 	// Check for successful response
@@ -225,8 +225,26 @@ func (f *flexpriceOutput) sendBulkEvents(ctx context.Context, events []flexprice
 }
 
 // handleAPIError processes API errors and determines retry behavior
-func (f *flexpriceOutput) handleAPIError(err error, httpResp *http.Response, operation string) error {
-	f.logger.Errorf("Failed to send %s: %v", operation, err)
+func (f *flexpriceOutput) handleAPIError(err error, result map[string]string, httpResp *http.Response, operation string, singleEvent *flexprice.DtoIngestEventRequest, bulkRequest *flexprice.DtoBulkIngestEventRequest) error {
+	f.logger.Errorf("Failed to send %s - Error: %v", operation, err)
+	if result != nil {
+		f.logger.Errorf("API Response: %+v", result)
+	}
+
+	// Log failed payload as debug (only on error) - marshal to JSON for readability
+	if singleEvent != nil {
+		if payloadJSON, marshalErr := json.Marshal(singleEvent); marshalErr == nil {
+			f.logger.Debugf("Failed payload: %s", string(payloadJSON))
+		} else {
+			f.logger.Debugf("Failed payload (marshal error): %+v", singleEvent)
+		}
+	} else if bulkRequest != nil {
+		if payloadJSON, marshalErr := json.Marshal(bulkRequest); marshalErr == nil {
+			f.logger.Debugf("Failed bulk payload: %s", string(payloadJSON))
+		} else {
+			f.logger.Debugf("Failed bulk payload (marshal error): %+v", bulkRequest)
+		}
+	}
 
 	// Check HTTP status code for retry logic
 	if httpResp != nil {
