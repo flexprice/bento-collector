@@ -54,9 +54,13 @@ pipeline:
         root.timestamp = this.startedAt.string()
         root.source = this.key.string()
 
-        # Start with `data` fields (stringify values; objects/arrays become JSON strings)
+        # Start with `data` fields (extract values from key-value objects, otherwise stringify)
         root.properties = if this.data != null && this.data.type() == "object" {
-          this.data.map_each(v -> v.string())
+          this.data.map_each(v -> if v.type() == "object" && v.key != null && v.value != null {
+            v.value.string()
+          } else {
+            v.string()
+          })
         } else {
           {}
         }
@@ -67,6 +71,7 @@ pipeline:
         }
         if this.dataInterface != null { root.properties.dataInterface = this.dataInterface.string() }
         if this.serviceName != null { root.properties.serviceName = this.serviceName.string() }
+        if this.providerName != null { root.properties.providerName = this.providerName.string() }
         if this.methodName != null { root.properties.methodName = this.methodName.string() }
         if this.targetItemType != null { root.properties.targetItemType = this.targetItemType.string() }
         if this.targetItemId != null { root.properties.targetItemId = this.targetItemId.string() }
