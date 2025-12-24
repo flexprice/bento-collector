@@ -72,6 +72,7 @@ pipeline:
         if this.dataInterface != null { root.properties.dataInterface = this.dataInterface.string() }
         if this.serviceName != null { root.properties.serviceName = this.serviceName.string() }
         if this.providerName != null { root.properties.providerName = this.providerName.string() }
+        if this.referenceCost != null { root.properties.referenceCost = this.referenceCost.string() }
         if this.methodName != null { root.properties.methodName = this.methodName.string() }
         if this.targetItemType != null { root.properties.targetItemType = this.targetItemType.string() }
         if this.targetItemId != null { root.properties.targetItemId = this.targetItemId.string() }
