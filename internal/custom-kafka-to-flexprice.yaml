@@ -1,0 +1,146 @@
+# Bento Collector - Kafka consumer to transform BillingEntry events to Flexprice
+# Reads BillingEntry events from Kafka and transforms them to Flexprice event format
+
+input:
+  kafka:
+    # Staging Kafka brokers
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    # Test topic (configurable via environment)
+    topics:
+      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    # Consumer group (use a new group name to skip old messages)
+    consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-billing-flexprice-v1}
+
+    # Start from LATEST to read only new messages (set to true to start from oldest/beginning)
+    # IMPORTANT: If start_from_oldest: true and no messages at beginning, consumer will wait
+    # Try false first to consume new messages, then true to read historical messages
+    start_from_oldest: true
+
+    # SASL Authentication for Confluent Cloud
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: PLAIN
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    # Client ID
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-billing-collector}
+
+    # Performance tuning for batching
+    commit_period: 1s
+    max_processing_period: 100ms
+
+    # Fetch settings - get messages faster for batching
+    fetch_buffer_cap: 256 # Fetch up to 256 messages at once
+
+    # Allow multiple messages in-flight before committing offsets
+    # IMPORTANT: With batching enabled in the output, we need to allow many messages
+    # to be in-flight before committing. Otherwise, Kafka will wait for each batch
+    # to complete before reading the next message, causing slow consumption.
+    checkpoint_limit: 1000
+
+pipeline:
+  processors:
+    # Store original event in metadata for DLQ (before transformation)
+    - mapping: |
+        # Preserve original event for potential DLQ
+        meta.original_event = this.string()
+        meta.original_topic = meta("kafka_topic")
+        meta.original_partition = meta("kafka_partition")
+        meta.original_offset = meta("kafka_offset")
+
+        # Pass through the message unchanged for transformation
+        root = this
+
+    # Transform BillingEntry to Flexprice event format
+    - mapping: |
+        # Required Flexprice fields
+        # orgId -> external_customer_id
+        root.external_customer_id = this.orgId.string()
+        
+        # dataInterface -> event_name
+        root.event_name = this.dataInterface.string()
+        
+        # id -> event_id
+        root.event_id = this.id.string()
+        
+        # startedAt -> timestamp
+        root.timestamp = this.startedAt.string()
+        
+        # Build properties object: start with data object fields (all values as strings)
+        # All fields from data object go directly into properties
+        root.properties = if this.data != null && this.data.type() == "object" {
+          this.data.map_each(v -> v.value.string())
+        } else {
+          {}
+        }
+        
+        # Add all other remaining BillingEntry fields to properties
+        # All values must be strings for Flexprice
+        # Only add if field exists and is not null
+        if this.serviceName != null {
+          root.properties.serviceName = this.serviceName.string()
+        }
+        if this.methodName != null {
+          root.properties.methodName = this.methodName.string()
+        }
+        if this.targetItemType != null {
+          root.properties.targetItemType = this.targetItemType.string()
+        }
+        if this.targetItemId != null {
+          root.properties.targetItemId = this.targetItemId.string()
+        }
+        if this.referenceType != null {
+          root.properties.referenceType = this.referenceType.string()
+        }
+        if this.referenceId != null {
+          root.properties.referenceId = this.referenceId.string()
+        }
+        if this.createdAt != null {
+          root.properties.createdAt = this.createdAt.string()
+        }
+        if this.updatedAt != null {
+          root.properties.updatedAt = this.updatedAt.string()
+        }
+        if this.endedAt != null {
+          root.properties.endedAt = this.endedAt.string()
+        }
+        
+        # Source tracking
+        root.source = "billing-entry-kafka"
+
+    # Log each event being processed
+    - log:
+        level: INFO
+        message: |
+          [KAFKA→FLEXPRICE] Processing BillingEntry:
+          - Event Name: ${!json("event_name")}
+          - Customer ID: ${!json("external_customer_id")}
+          - Event ID: ${!json("event_id")}
+          - Timestamp: ${!json("timestamp")}
+          - Service: ${!json("properties.serviceName")}
+
+output:
+  flexprice:
+    api_host: ${FLEXPRICE_API_HOST}
+    api_key: ${FLEXPRICE_API_KEY}
+    scheme: https
+
+    # Batching configuration - efficiently send multiple events in bulk
+    batching:
+      count: ${FLEXPRICE_BATCH_SIZE:10} # Send bulk when we have 10 events
+      period: ${FLEXPRICE_BATCH_PERIOD:2s} # Or send after 2 seconds
+
+    # Maximum concurrent requests
+    max_in_flight: ${FLEXPRICE_MAX_IN_FLIGHT:10}
+
+logger:
+  level: ${LOG_LEVEL:INFO}  # Set to DEBUG for troubleshooting, INFO for production
+  format: logfmt
+  add_timestamp: true
+

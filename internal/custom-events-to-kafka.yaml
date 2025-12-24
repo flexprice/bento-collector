@@ -1,0 +1,194 @@
+# Bento Collector - Generate BillingEntry Events to Kafka
+# This configuration generates BillingEntry events and sends them to Kafka
+# The events match the BillingEntry schema and can be consumed by custom-kafka-to-flexprice.yaml
+
+input:
+  generate:
+    interval: 1s # Generate one event every 1 second
+    count: 1 # Generate 1 event (run multiple times for more events)
+    mapping: |
+      # Randomly select event type: TranscriberDurationData, ModelUsageData, or PromptModelUsageData
+      event_type_index = random_int(max: 3)
+      
+      # Common fields for all BillingEntry events
+      root.id = "billing-entry-" + uuid_v4().slice(0, 8)
+      
+      # Random org ID selection
+      org_index = random_int(max: 4)
+      root.orgId = if org_index == 0 {
+        "org-12345"
+      } else if org_index == 1 {
+        "org-67890"
+      } else if org_index == 2 {
+        "org-11111"
+      } else {
+        "org-22222"
+      }
+      
+      root.targetItemType = "CALL"
+      root.targetItemId = "call-" + uuid_v4().slice(0, 8)
+      root.referenceType = if event_type_index == 0 {
+        "Transcription"
+      } else if event_type_index == 1 {
+        "ModelUsage"
+      } else {
+        "PromptModelUsage"
+      }
+      
+      # Random service selection
+      service_index = random_int(max: 5)
+      root.serviceName = if service_index == 0 {
+        "Deepgram"
+      } else if service_index == 1 {
+        "Anthropic"
+      } else if service_index == 2 {
+        "OpenAI"
+      } else if service_index == 3 {
+        "DeepSeek"
+      } else {
+        "Custom"
+      }
+      
+      # Timestamps (all ISO 8601 format)
+      base_time = now()
+      root.startedAt = base_time.format_timestamp("2006-01-02T15:04:05Z07:00")
+      root.createdAt = base_time.format_timestamp("2006-01-02T15:04:05Z07:00")
+      root.updatedAt = base_time.format_timestamp("2006-01-02T15:04:05Z07:00")
+      root.endedAt = base_time.format_timestamp("2006-01-02T15:04:05Z07:00")
+      
+      # Generate data object based on event type
+      if event_type_index == 0 {
+        # TranscriberDurationData
+        root.dataInterface = "TranscriberDurationData"
+        model_index = random_int(max: 3)
+        root.methodName = if root.serviceName == "Deepgram" {
+          if model_index == 0 {
+            "nova-2"
+          } else if model_index == 1 {
+            "nova"
+          } else {
+            "whisper-large"
+          }
+        } else {
+          ""
+        }
+        root.referenceId = "transcription-" + uuid_v4().slice(0, 8)
+        root.data = {
+          "modelName": root.methodName.or(""),
+          "durationMS": random_int(min: 60000, max: 600000),
+          "keywordsDurationMs": random_int(min: 0, max: 10000)
+        }
+      } else if event_type_index == 1 {
+        # ModelUsageData
+        root.dataInterface = "ModelUsageData"
+        model_index = random_int(max: 3)
+        root.methodName = if root.serviceName == "Anthropic" {
+          if model_index == 0 {
+            "claude-3-opus"
+          } else if model_index == 1 {
+            "claude-3-sonnet"
+          } else {
+            "claude-3-haiku"
+          }
+        } else if root.serviceName == "OpenAI" {
+          if model_index == 0 {
+            "gpt-4"
+          } else if model_index == 1 {
+            "gpt-3.5-turbo"
+          } else {
+            "gpt-4-turbo"
+          }
+        } else if root.serviceName == "DeepSeek" {
+          "deepseek-chat"
+        } else {
+          ""
+        }
+        root.referenceId = "model-usage-" + uuid_v4().slice(0, 8)
+        
+        # Build data object with conditional fields based on service
+        root.data = {
+          "modelName": root.methodName.or(""),
+          "promptTokens": random_int(min: 500, max: 5000),
+          "completionTokens": random_int(min: 200, max: 3000),
+          "isPostCall": random_bool()
+        }
+        
+        # Add Anthropic-specific fields
+        if root.serviceName == "Anthropic" {
+          root.data.cacheCreationInputTokens = random_int(min: 0, max: 500)
+          root.data.cacheReadInputTokens = random_int(min: 0, max: 500)
+        }
+        
+        # Add DeepSeek-specific fields
+        if root.serviceName == "DeepSeek" {
+          root.data.promptCacheHitTokens = random_int(min: 0, max: 1000)
+          root.data.promptCacheMissTokens = random_int(min: 0, max: 4000)
+        }
+      } else {
+        # PromptModelUsageData
+        root.dataInterface = "PromptModelUsageData"
+        prompt_model_index = random_int(max: 2)
+        root.methodName = if prompt_model_index == 0 {
+          "claude-3-opus"
+        } else {
+          "claude-3-sonnet"
+        }
+        root.referenceId = "prompt-model-" + uuid_v4().slice(0, 8)
+        root.data = {
+          "modelName": root.methodName,
+          "uncachedPromptAudioTokens": random_int(min: 1000, max: 10000),
+          "uncachedPromptTextTokens": random_int(min: 500, max: 5000),
+          "cachedPromptAudioTokens": random_int(min: 0, max: 5000),
+          "cachedPromptTextTokens": random_int(min: 0, max: 2000),
+          "candidatesAudioTokens": random_int(min: 1000, max: 8000),
+          "candidatesTextTokens": random_int(min: 200, max: 2000),
+          "completionTextTokens": random_int(min: 500, max: 5000),
+          "completionAudioTokens": random_int(min: 1000, max: 10000)
+        }
+      }
+
+pipeline:
+  processors:
+    # Log each event being sent
+    - log:
+        level: INFO
+        message: |
+          [GENERATOR→KAFKA] Generating BillingEntry event:
+          - Entry ID: ${!json("id")}
+          - Org ID: ${!json("orgId")}
+          - Service: ${!json("serviceName")}
+          - Data Interface: ${!json("dataInterface")}
+          - Reference Type: ${!json("referenceType")}
+          - Target Item: ${!json("targetItemId")}
+
+output:
+  kafka:
+    # Same Kafka brokers as consumer
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    # Same topic as consumer
+    topic: ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    # SASL Authentication for Confluent Cloud (same as consumer)
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: PLAIN
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    # Client ID for producer
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-billing-generator}
+
+    # Batching for efficient message sending
+    batching:
+      count: 1 # Send immediately (since we're generating 1 at a time)
+      period: 100ms # Or send after 100ms
+
+logger:
+  level: INFO
+  format: logfmt
+  add_timestamp: true
+

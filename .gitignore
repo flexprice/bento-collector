@@ -1,5 +1,8 @@
-.env.staging
-.env
+.env*
 
 # binaries
 bento-flexprice
+
+# sample json files in examples
+examples/*.json
+internal/*.json
