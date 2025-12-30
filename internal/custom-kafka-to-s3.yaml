@@ -131,6 +131,9 @@ output:
       secret: ${AWS_SECRET_ACCESS_KEY:} # Empty = use default provider chain (ECS task role)
       token: ${AWS_SESSION_TOKEN:}     # Optional: for temporary credentials
     
+    # Request timeout (increase if seeing 'context deadline exceeded' errors)
+    timeout: ${S3_WRITE_TIMEOUT:30s}
+    
     # Batching configuration - write multiple events in batches
     # Batching improves S3 throughput significantly (see Bento performance tuning guide)
     # With checkpoint_limit increased, Kafka can read many messages while batches are being formed
