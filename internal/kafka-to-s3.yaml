@@ -38,7 +38,7 @@ input:
     max_processing_period: 100ms
 
     # Fetch settings - get messages faster for batching
-    fetch_buffer_cap: 256 # Fetch up to 256 messages at once
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:1024} # Fetch up to 1024 messages at once
 
     # Allow multiple messages in-flight before committing offsets
     # IMPORTANT: With batching enabled in the output, we need to allow many messages
@@ -50,7 +50,7 @@ input:
     # - Messages are batched in the S3 output (up to 100 messages or 2 seconds)
     # - With checkpoint_limit: 1000, Kafka can read up to 1000 messages before
     #   needing to commit offsets, allowing batching to work efficiently
-    checkpoint_limit: 1000
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:5000}
 
 # Rate Limiting Configuration (OPTIONAL)
 # ======================================
