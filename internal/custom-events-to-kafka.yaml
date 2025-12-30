@@ -175,7 +175,7 @@ output:
       enabled: true
 
     sasl:
-      mechanism: PLAIN
+      mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
       user: ${FLEXPRICE_KAFKA_SASL_USER}
       password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
 
