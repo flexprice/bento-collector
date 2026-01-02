@@ -39,8 +39,7 @@ pipeline:
           this.methodName != null && this.methodName != "" &&
           this.providerName != null && this.providerName != "" &&
           this.id != null && this.id != "" &&
-          this.startedAt != null && this.startedAt != "" &&
-          this.key != null && this.key != ""
+          this.startedAt != null && this.startedAt != ""
         )
 
         root = if $valid { this } else { deleted() }
@@ -52,7 +51,7 @@ pipeline:
         root.event_name = this.targetItemType.string() + "-" + this.methodName.string() + "-" + this.providerName.string()
         root.event_id = this.id.string()
         root.timestamp = this.startedAt.string()
-        root.source = this.key.string()
+        if this.targetItemId != null { root.source = this.targetItemId.string() }
 
         # Start with `data` fields (extract values from key-value objects, otherwise stringify)
         root.properties = if this.data != null && this.data.type() == "object" {
