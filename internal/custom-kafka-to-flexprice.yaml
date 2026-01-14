@@ -37,7 +37,7 @@ pipeline:
           this.orgId != null && this.orgId != "" &&
           this.targetItemType != null && this.targetItemType != "" &&
           this.methodName != null && this.methodName != "" &&
-          this.providerName != null && this.providerName != "" &&
+          ((this.providerName != null && this.providerName != "") || (this.serviceName != null && this.serviceName != "")) &&
           this.id != null && this.id != "" &&
           this.startedAt != null && this.startedAt != ""
         )
@@ -46,12 +46,6 @@ pipeline:
 
     - mapping: |
         root = {}
-
-        root.external_customer_id = this.orgId.string()
-        root.event_name = this.targetItemType.string() + "-" + this.methodName.string() + "-" + this.providerName.string()
-        root.event_id = this.id.string()
-        root.timestamp = this.startedAt.string()
-        if this.targetItemId != null { root.source = this.targetItemId.string() }
 
         # Start with `data` fields (extract values from key-value objects, otherwise stringify)
         root.properties = if this.data != null && this.data.type() == "object" {
@@ -64,6 +58,20 @@ pipeline:
           {}
         }
 
+        root.properties.resolvedProviderName = ""
+        if this.providerName != null && this.providerName != "" {
+          root.properties.resolvedProviderName = this.providerName.string().trim()
+        } else if this.serviceName != null && this.serviceName != "" {
+          root.properties.resolvedProviderName = this.serviceName.string().trim()
+        }
+
+        root.external_customer_id = this.orgId.string()
+        root.event_name = (this.targetItemType.string() + "-" + this.methodName.string() + "-" + root.properties.resolvedProviderName).lowercase()
+        root.event_id = this.id.string()
+        root.timestamp = this.startedAt.string()
+        if this.targetItemId != null { root.source = this.targetItemId.string() }
+
+      
         # Add selected top-level fields into properties
         if this.byok != null {
           root.properties.byok = this.byok.string()
