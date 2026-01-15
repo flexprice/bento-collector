@@ -21,11 +21,17 @@ input:
 
     commit_period: 1s
     max_processing_period: 100ms
-    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:1024}
-    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:5000}
+    # Reduced buffer to prevent over-fetching from Kafka
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:10}
+    # Limit concurrent messages per partition (10 partitions × 10 = ~100 max in flight)
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:10}
 
 pipeline:
   processors:
+    # Rate limit at 100 messages per second across all partitions
+    - rate_limit:
+        resource: kafka_input_rate_limit
+
     - mapping: |
         # Preserve the raw original message (safe for DLQ/debug)
         meta.original_event = content().string()
@@ -111,6 +117,12 @@ output:
       period: ${FLEXPRICE_BATCH_PERIOD:2s}
 
     max_in_flight: ${FLEXPRICE_MAX_IN_FLIGHT:10}
+
+rate_limit_resources:
+  - label: kafka_input_rate_limit
+    local:
+      count: ${KAFKA_INPUT_RATE_LIMIT:100}  # messages per interval
+      interval: 1s                           # per second
 
 logger:
   level: ${LOG_LEVEL:INFO}
