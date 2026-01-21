@@ -1,0 +1,183 @@
+input:
+  kafka:
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    topics:
+      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-billing-flexprice-v1}
+    start_from_oldest: true
+
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-billing-collector}
+
+    commit_period: 1s
+    max_processing_period: 100ms
+    # Reduced buffer to prevent over-fetching from Kafka
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:10}
+    # Limit concurrent messages per partition (10 partitions × 10 = ~100 max in flight)
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:10}
+
+pipeline:
+  processors:
+    # Rate limit at 100 messages per second across all partitions
+    - rate_limit:
+        resource: kafka_input_rate_limit
+
+    - mapping: |
+        # Preserve the raw original message (safe for DLQ/debug)
+        meta.original_event = content().string()
+        meta.original_topic = meta("kafka_topic")
+        meta.original_partition = meta("kafka_partition")
+        meta.original_offset = meta("kafka_offset")
+
+        let valid = (
+          this.orgId != null && this.orgId != "" &&
+          this.methodName != null && this.methodName != "" &&
+          ((this.providerName != null && this.providerName != "") || (this.serviceName != null && this.serviceName != "")) &&
+          (this.data != null && this.data.modelName != null && this.data.modelName != "") &&
+          this.id != null && this.id != "" &&
+          this.startedAt != null && this.startedAt != ""
+        )
+
+        root = if $valid { this } else { deleted() }
+
+    - mapping: |
+        root = {}
+
+        # Start with `data` fields (extract values from key-value objects, otherwise stringify)
+        root.properties = if this.data != null && this.data.type() == "object" {
+          this.data.map_each(v -> if v.type() == "object" && v.key != null && v.value != null {
+            v.value.string()
+          } else {
+            v.string()
+          })
+        } else {
+          {}
+        }
+
+        root.properties.resolvedProviderName = ""
+        if this.providerName != null && this.providerName != "" {
+          root.properties.resolvedProviderName = this.providerName.string().trim().lowercase()
+        } else if this.serviceName != null && this.serviceName != "" {
+          root.properties.resolvedProviderName = this.serviceName.string().trim().lowercase() 
+        }
+
+        root.properties.resolvedModelName = ""
+        if root.properties.modelName != null && root.properties.modelName != "" {
+          root.properties.resolvedModelName = "-" + root.properties.modelName.string().trim().lowercase()
+        } else if this.data != null && this.data.modelName != null && this.data.modelName != "" {
+          root.properties.resolvedModelName = "-" + this.data.modelName.string().trim().lowercase()
+        }
+
+        root.properties.resolvedMethodName = ""
+        if this.methodName != null && this.methodName != "" {
+          if this.methodName == "BEDROCK_LLM" {
+            root.properties.resolvedMethodName = "-modelling"
+          } else {
+            root.properties.resolvedMethodName = "-" + this.methodName.string().trim().lowercase()
+          }
+        }
+
+        # Flexprice Event structure fields (matching Go Event struct)
+        root.id = this.id.string()
+
+        if env("FLEXPRICE_TENANT_ID") != null {
+          root.tenant_id = env("FLEXPRICE_TENANT_ID").string().or("")
+        } else {
+          root.tenant_id = ""
+        }
+        if env("FLEXPRICE_ENVIRONMENT_ID") != null {
+          root.environment_id = env("FLEXPRICE_ENVIRONMENT_ID").string().or("")
+        } else {
+          root.environment_id = ""
+        }
+        
+        if env("FLEXPRICE_TENANT_ID") != null {
+          root.partition_key = env("FLEXPRICE_TENANT_ID").string().or("") + ":" + this.orgId.string()
+        } else {
+          root.partition_key = ""
+        }
+
+        root.external_customer_id = this.orgId.string()
+        root.event_name = root.properties.resolvedProviderName + root.properties.resolvedMethodName + root.properties.resolvedModelName
+        root.timestamp = this.startedAt.string()
+        if this.targetItemId != null { root.source = this.targetItemId.string() }
+      
+        # Add selected top-level fields into properties
+        if this.byok != null {
+          root.properties.byok = this.byok.string()
+        }
+        if this.dataInterface != null { root.properties.dataInterface = this.dataInterface.string() }
+        if this.serviceName != null { root.properties.serviceName = this.serviceName.string() }
+        if this.providerName != null { root.properties.providerName = this.providerName.string() }
+        if this.referenceCost != null { root.properties.referenceCost = this.referenceCost.string() }
+        if this.methodName != null { root.properties.methodName = this.methodName.string() }
+        if this.targetItemType != null { root.properties.targetItemType = this.targetItemType.string() }
+        if this.targetItemId != null { root.properties.targetItemId = this.targetItemId.string() }
+        if this.referenceType != null { root.properties.referenceType = this.referenceType.string() }
+        if this.referenceId != null { root.properties.referenceId = this.referenceId.string() }
+        if this.createdAt != null { root.properties.createdAt = this.createdAt.string() }
+        if this.updatedAt != null { root.properties.updatedAt = this.updatedAt.string() }
+        if this.endedAt != null { root.properties.endedAt = this.endedAt.string() }
+
+        meta.tenant_id = root.tenant_id
+        meta.environment_id = root.environment_id
+
+    - log:
+        level: INFO
+        message: |
+          [KAFKA→KAFKA] Processing BillingEntry:
+          - Event ID: ${!json("id")}
+          - Tenant ID (JSON): ${!json("tenant_id")}
+          - Environment ID (JSON): ${!json("environment_id")}
+          - Partition Key (JSON): ${!json("partition_key")}
+          - Event Name: ${!json("event_name")}
+          - External Customer ID: ${!json("external_customer_id")}
+          - Timestamp: ${!json("timestamp")}
+          - Source: ${!json("source")}
+          - Properties: ${!json("properties")}
+
+output:
+  kafka:
+    addresses:
+      - ${FLEXPRICE_OUTPUT_KAFKA_BROKERS}
+
+    topic: ${FLEXPRICE_OUTPUT_KAFKA_TOPIC:bento-flexprice-output}
+
+    key: ${!json("partition_key")}
+
+    tls:
+      enabled: ${FLEXPRICE_OUTPUT_KAFKA_TLS_ENABLED:true}
+
+    sasl:
+      mechanism: ${FLEXPRICE_OUTPUT_KAFKA_SASL_MECHANISM:PLAIN}
+      user: ${FLEXPRICE_OUTPUT_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD}
+
+    client_id: ${FLEXPRICE_OUTPUT_KAFKA_CLIENT_ID:bento-billing-flexprice-output}
+
+    batching:
+      count: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_SIZE:10}
+      period: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_PERIOD:2s}
+
+    max_in_flight: ${FLEXPRICE_OUTPUT_KAFKA_MAX_IN_FLIGHT:10}
+
+rate_limit_resources:
+  - label: kafka_input_rate_limit
+    local:
+      count: ${KAFKA_INPUT_RATE_LIMIT:100}  # messages per interval
+      interval: 1s                           # per second
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true

@@ -1,0 +1,61 @@
+input:
+  kafka:
+    addresses:
+      - ${FLEXPRICE_OUTPUT_KAFKA_BROKERS}
+
+    topics:
+      # Read from your output topic to verify keys are set correctly
+      # Default: FLEXPRICE_OUTPUT_KAFKA_TOPIC, fallback to events topic
+      - ${FLEXPRICE_OUTPUT_KAFKA_TOPIC:bento-flexprice-output}
+
+    consumer_group: ${FLEXPRICE_OUTPUT_KAFKA_VERIFY_GROUP:flexprice-output-verifier}
+    start_from_oldest: false  # Start from latest to see new messages
+
+    tls:
+      enabled: ${FLEXPRICE_OUTPUT_KAFKA_TLS_ENABLED:true}
+
+    sasl:
+      mechanism: ${FLEXPRICE_OUTPUT_KAFKA_SASL_MECHANISM:PLAIN}
+      user: ${FLEXPRICE_OUTPUT_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD}
+
+    client_id: ${FLEXPRICE_OUTPUT_KAFKA_CLIENT_ID:bento-flexprice-output-verifier}
+
+    commit_period: 1s
+    max_processing_period: 100ms
+    fetch_buffer_cap: 1
+    checkpoint_limit: 1
+
+pipeline:
+  processors:
+    # Add a mapping to inspect all available metadata
+    - mapping: |
+        # Log all metadata keys for debugging
+        meta.all_metadata_keys = meta().keys().join(", ")
+    
+    - log:
+        level: INFO
+        message: |
+          [VERIFY OUTPUT] ✅ Message Verification:
+          - ALL METADATA KEYS: ${!meta("all_metadata_keys")}
+          - Partition: ${!meta("kafka_partition")}
+          - Partition Key (JSON): ${!json("partition_key")}
+          - Tenant ID (JSON): ${!json("tenant_id")}
+          - Environment ID (JSON): ${!json("environment_id")}
+          - Tenant ID (Header/Meta): ${!meta("tenant_id")}
+          - Environment ID (Header/Meta): ${!meta("environment_id")}
+          - Partition Key (Header/Meta): ${!meta("partition_key")}
+          - Event ID (JSON): ${!json("id")}
+          - Event Name: ${!json("event_name")}
+          - External Customer ID (JSON): ${!json("external_customer_id")}
+          - Nikhil Key (Header/Meta): ${!meta("nikhil_key")}
+          - Kafka Nikhil Key (Header/Meta): ${!meta("kafka_nikhil_key")}
+          - Nikhil Header (Static Header): ${!meta("nikhil_header")}
+
+output:
+  drop: {}
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true
