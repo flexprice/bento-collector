@@ -71,8 +71,10 @@ pipeline:
         }
 
         root.properties.resolvedModelName = ""
-        if this.modelName != null && this.modelName != "" {
-          root.properties.resolvedModelName = "-" + this.modelName.string().trim().lowercase()
+        if root.properties.modelName != null && root.properties.modelName != "" {
+          root.properties.resolvedModelName = "-" + root.properties.modelName.string().trim().lowercase()
+        } else if this.data != null && this.data.modelName != null && this.data.modelName != "" {
+          root.properties.resolvedModelName = "-" + this.data.modelName.string().trim().lowercase()
         }
 
         root.properties.resolvedMethodName = ""
