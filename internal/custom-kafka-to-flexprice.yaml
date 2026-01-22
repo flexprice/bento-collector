@@ -80,7 +80,7 @@ pipeline:
         root.properties.resolvedMethodName = ""
         if this.methodName != null && this.methodName != "" {
           if this.methodName == "BEDROCK_LLM" {
-            root.properties.resolvedMethodName = "-modelling"
+            root.properties.resolvedMethodName = "-modeling"
           } else {
             root.properties.resolvedMethodName = "-" + this.methodName.string().trim().lowercase()
           }
