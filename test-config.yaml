@@ -1,44 +1,13 @@
 input:
-  kafka:
-    addresses:
-      - ${FLEXPRICE_KAFKA_BROKERS}
-
-    topics:
-      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
-
-    consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-billing-flexprice-v1}
-    start_from_oldest: true
-
-    tls:
-      enabled: true
-
-    sasl:
-      mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
-      user: ${FLEXPRICE_KAFKA_SASL_USER}
-      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
-
-    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-billing-collector}
-
-    commit_period: 1s
-    max_processing_period: 100ms
-    # Reduced buffer to prevent over-fetching from Kafka
-    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:10}
-    # Limit concurrent messages per partition (10 partitions × 10 = ~100 max in flight)
-    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:10}
+  file:
+    paths:
+      - test-input-*.json
+    scanner:
+      lines: {}
 
 pipeline:
   processors:
-    # Rate limit at 100 messages per second across all partitions
-    - rate_limit:
-        resource: kafka_input_rate_limit
-
     - mapping: |
-        # Preserve the raw original message (safe for DLQ/debug)
-        meta.original_event = content().string()
-        meta.original_topic = meta("kafka_topic")
-        meta.original_partition = meta("kafka_partition")
-        meta.original_offset = meta("kafka_offset")
-
         let valid = (
           this.orgId != null && this.orgId != "" &&
           this.methodName != null && this.methodName != "" &&
@@ -129,36 +98,10 @@ pipeline:
           root.properties.billable_value = (root.properties.billable_value.number() * root.properties.channels.number()).string()
         }
 
-    - log:
-        level: INFO
-        message: |
-          [KAFKA→FLEXPRICE] Processing BillingEntry:
-          - Event Name: ${!json("event_name")}
-          - Customer ID: ${!json("external_customer_id")}
-          - Event ID: ${!json("event_id")}
-          - Timestamp: ${!json("timestamp")}
-          - Source: ${!json("source")}
-          - Properties: ${!json("properties")}
-
 output:
-  flexprice:
-    api_host: ${FLEXPRICE_API_HOST}
-    api_key: ${FLEXPRICE_API_KEY}
-    scheme: https
+  stdout:
+    codec: lines
 
-    batching:
-      count: ${FLEXPRICE_BATCH_SIZE:10}
-      period: ${FLEXPRICE_BATCH_PERIOD:2s}
 
-    max_in_flight: ${FLEXPRICE_MAX_IN_FLIGHT:10}
 
-rate_limit_resources:
-  - label: kafka_input_rate_limit
-    local:
-      count: ${KAFKA_INPUT_RATE_LIMIT:100}  # messages per interval
-      interval: 1s                           # per second
-
-logger:
-  level: ${LOG_LEVEL:INFO}
-  format: logfmt
-  add_timestamp: true
+#command to run:benthos -c test-config.yaml 2>/dev/null | jq '.properties'
