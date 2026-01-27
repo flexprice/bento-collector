@@ -124,21 +124,9 @@ pipeline:
           root.properties.billable_unit = "milliseconds"
         }
 
-        # Multiply billable_value by channels if channels exists and both are valid numbers
-        if root.properties.billable_value != "" && root.properties.channels != null {
-          let billable_num = if root.properties.billable_value.type() == "number" {
-            root.properties.billable_value
-          } else {
-            root.properties.billable_value.number().catch(null)
-          }
-          let channels_num = if root.properties.channels.type() == "number" {
-            root.properties.channels
-          } else {
-            root.properties.channels.number().catch(null)
-          }
-          if $billable_num != null && $channels_num != null {
-            root.properties.billable_value = ($billable_num * $channels_num).string()
-          }
+        # Multiply billable_value by channels if both exist and are valid numbers > 0
+        if root.properties.billable_value != "" && root.properties.channels != null && root.properties.billable_value.number().catch(0) > 0 && root.properties.channels.number().catch(0) > 0 {
+          root.properties.billable_value = (root.properties.billable_value.number() * root.properties.channels.number()).string()
         }
 
     - log:
