@@ -45,7 +45,7 @@ pipeline:
           ((this.providerName != null && this.providerName != "") || (this.serviceName != null && this.serviceName != "")) &&
           (this.data != null && this.data.modelName != null && this.data.modelName != "") &&
           this.id != null && this.id != "" &&
-          this.startedAt != null && this.startedAt != ""
+          this.createdAt != null && this.createdAt != ""
         )
 
         root = if $valid { this } else { deleted() }
@@ -109,7 +109,7 @@ pipeline:
 
         root.external_customer_id = this.orgId.string()
         root.event_name = root.properties.resolvedProviderName + root.properties.resolvedMethodName + root.properties.resolvedModelName
-        root.timestamp = this.startedAt.string()
+        root.timestamp = this.createdAt.string()
         if this.targetItemId != null { root.source = this.targetItemId.string() }
       
         # Add selected top-level fields into properties
@@ -125,6 +125,7 @@ pipeline:
         if this.targetItemId != null { root.properties.targetItemId = this.targetItemId.string() }
         if this.referenceType != null { root.properties.referenceType = this.referenceType.string() }
         if this.referenceId != null { root.properties.referenceId = this.referenceId.string() }
+        if this.startedAt != null { root.properties.startedAt = this.startedAt.string() }
         if this.createdAt != null { root.properties.createdAt = this.createdAt.string() }
         if this.updatedAt != null { root.properties.updatedAt = this.updatedAt.string() }
         if this.endedAt != null { root.properties.endedAt = this.endedAt.string() }
