@@ -111,6 +111,36 @@ pipeline:
         if this.updatedAt != null { root.properties.updatedAt = this.updatedAt.string() }
         if this.endedAt != null { root.properties.endedAt = this.endedAt.string() }
 
+        # Initialize billable fields with empty strings
+        root.properties.billable_value = ""
+        root.properties.billable_unit = ""
+
+        # Add billable_value and billable_unit based on numCharacters or durationMS
+        if root.properties.numCharacters != null {
+          root.properties.billable_value = root.properties.numCharacters
+          root.properties.billable_unit = "characters"
+        } else if root.properties.durationMS != null {
+          root.properties.billable_value = root.properties.durationMS
+          root.properties.billable_unit = "milliseconds"
+        }
+
+        # Multiply billable_value by channels if channels exists and both are valid numbers
+        if root.properties.billable_value != "" && root.properties.channels != null {
+          let billable_num = if root.properties.billable_value.type() == "number" {
+            root.properties.billable_value
+          } else {
+            root.properties.billable_value.number().catch(null)
+          }
+          let channels_num = if root.properties.channels.type() == "number" {
+            root.properties.channels
+          } else {
+            root.properties.channels.number().catch(null)
+          }
+          if $billable_num != null && $channels_num != null {
+            root.properties.billable_value = ($billable_num * $channels_num).string()
+          }
+        }
+
     - log:
         level: INFO
         message: |
