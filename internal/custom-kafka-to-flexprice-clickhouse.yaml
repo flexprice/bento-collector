@@ -54,11 +54,14 @@ pipeline:
         root.external_customer_id = this.orgId.string().or("")
         root.source = this.targetItemId.string().or("")
         
-        # Timestamp: handle JSON null (becomes string "null"), missing fields, and empty strings
+        # Timestamp: parse ISO 8601 with timezone, then format for ClickHouse
+        # 1. Check if createdAt exists and is valid
+        # 2. Parse it as timestamp to preserve timezone info
+        # 3. Format to ClickHouse DateTime64 format: "2006-01-02 15:04:05.999"
         root.timestamp = if this.createdAt != null && this.createdAt.string().or("") != "" && this.createdAt.string() != "null" {
-          this.createdAt.string()
+          this.createdAt.ts_parse("2006-01-02T15:04:05Z07:00").ts_format("2006-01-02 15:04:05.999")
         } else {
-          timestamp_unix().ts_format("2006-01-02T15:04:05.999Z")
+          timestamp_unix().ts_format("2006-01-02 15:04:05.999")
         }
 
         # ---- Build event_name SAFELY ----
