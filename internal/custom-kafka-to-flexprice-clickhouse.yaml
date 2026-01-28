@@ -1,3 +1,12 @@
+# ============================================================================
+# Kafka to ClickHouse Pipeline - Raw Events
+# ============================================================================
+# Flow: Kafka → Transform → Batch → ClickHouse
+# 1. Consume events from Kafka topic
+# 2. Transform and normalize event data
+# 3. Batch events (1000 per batch or 1s timeout)
+# 4. Insert into ClickHouse using native protocol
+
 input:
   kafka:
     addresses:
@@ -26,25 +35,25 @@ input:
 
 pipeline:
   processors:
-    # ---- Basic validation ----
-    - mapping: |
-        let valid = (
-          this.id != null && this.id != "" &&
-          this.orgId != null && this.orgId != "" &&
-          this.createdAt != null && this.createdAt != ""
-        )
-        root = if $valid { this } else { deleted() }
-
+    # ============================================================================
+    # STEP 1: Transform raw event into ClickHouse schema
+    # ============================================================================
+    # - Extract core fields (id, customer, timestamp)
+    # - Build event_name from provider/service/method/model
+    # - Map additional fields to flexible analytics columns
+    # - All fields are null-safe with .or("") fallbacks
+    # ============================================================================
     # ---- Normalize + build raw payload ----
     - mapping: |
         root = {}
 
-        root.id = this.id.string()
+        # Generate UUID if id is missing or null
+        root.id = this.id.string().or(uuid_v4())
         root.tenant_id = env("FLEXPRICE_TENANT_ID").string().or("")
         root.environment_id = env("FLEXPRICE_ENVIRONMENT_ID").string().or("")
-        root.external_customer_id = this.orgId.string()
+        root.external_customer_id = this.orgId.string().or("")
         root.source = this.targetItemId.string().or("")
-        root.timestamp = this.createdAt.string()
+        root.timestamp = this.createdAt.string().or("")
 
         # ---- Build event_name SAFELY ----
         root.event_name = ""
@@ -63,7 +72,7 @@ pipeline:
           }
         }
 
-        if this.data.modelName.string().or("") != "" {
+        if this.data != null && this.data.modelName.string().or("") != "" {
           root.event_name = root.event_name + "-" + this.data.modelName.string().trim().lowercase()
         }
 
@@ -72,21 +81,29 @@ pipeline:
 
         # ---- Flexible analytics fields ----
         root.field1 = this.providerName.string().or("")
-        root.field2 = this.data.modelName.string().or("")
+        root.field2 = if this.data != null { this.data.modelName.string().or("") } else { "" }
         root.field3 = this.methodName.string().or("")
         root.field4 = this.byok.string().or("")
         root.field5 = this.dataInterface.string().or("")
         root.field6 = this.referenceType.string().or("")
         root.field7 = this.targetItemType.string().or("")
-        root.field8 = this.targetItemId.string().or("")
+        root.field8 = this.referenceCost.string().or("")
 
+# ============================================================================
+# STEP 2: Batch and Insert into ClickHouse
+# ============================================================================
+# - Batch up to 1000 events or flush after 1 second
+# - Use native ClickHouse protocol (port 9000) for better performance
+# - 8 parallel connections for high throughput
+# - Auto-retry on failures
+# ============================================================================
 output:
   sql_insert:
     driver: clickhouse
     
     # Use native ClickHouse protocol (port 9000) - more efficient than HTTP
-    # Password is URL-encoded to handle special characters (?, ;, !)
-    dsn: "clickhouse://${FLEXPRICE_CLICKHOUSE_USERNAME}:98eA22lu%3FP%3BQ%21A@${FLEXPRICE_CLICKHOUSE_ADDRESS}/${FLEXPRICE_CLICKHOUSE_DATABASE}"
+    # DSN is provided as a complete connection string from environment variable
+    dsn: "${FLEXPRICE_CLICKHOUSE_DSN}"
     
     table: flexprice.raw_events
     
@@ -128,13 +145,12 @@ output:
         this.timestamp
       ]
     
-    # 🔥 BATCH + ASYNC CONFIG (IMPORTANT)
     batching:
-      count: 1000        # 500–1000 batch size (use 500 if traffic is low)
-      period: 1s         # flush every second even if batch not full
+      count: ${CLICKHOUSE_BATCH_COUNT:1000}        # 500–1000 batch size (use 500 if traffic is low)
+      period: ${CLICKHOUSE_BATCH_PERIOD:1s}         # flush every second even if batch not full
       jitter: 0.1        # avoids thundering herd
     
-    max_in_flight: 8     # 8 parallel async inserts to ClickHouse
+    max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}     # 8 parallel async inserts to ClickHouse
 
 logger:
   level: ${LOG_LEVEL:INFO}
