@@ -53,7 +53,13 @@ pipeline:
         root.environment_id = env("FLEXPRICE_ENVIRONMENT_ID").string().or("")
         root.external_customer_id = this.orgId.string().or("")
         root.source = this.targetItemId.string().or("")
-        root.timestamp = this.createdAt.string().or("")
+        
+        # Timestamp: handle JSON null (becomes string "null"), missing fields, and empty strings
+        root.timestamp = if this.createdAt != null && this.createdAt.string().or("") != "" && this.createdAt.string() != "null" {
+          this.createdAt.string()
+        } else {
+          timestamp_unix().ts_format("2006-01-02T15:04:05.999Z")
+        }
 
         # ---- Build event_name SAFELY ----
         root.event_name = ""
