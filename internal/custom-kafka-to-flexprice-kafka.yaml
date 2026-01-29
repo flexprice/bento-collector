@@ -19,16 +19,22 @@ input:
 
     client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-billing-collector}
 
-    commit_period: 1s
-    max_processing_period: 100ms
-    # Reduced buffer to prevent over-fetching from Kafka
-    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:10}
-    # Limit concurrent messages per partition (10 partitions × 10 = ~100 max in flight)
-    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:10}
+    # Commit less frequently for better throughput (offsets committed after successful output)
+    commit_period: ${KAFKA_COMMIT_PERIOD:5s}
+    max_processing_period: ${KAFKA_MAX_PROCESSING_PERIOD:60s}
+    
+    # Fetch large batches from Kafka for high throughput
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:1000}
+    
+    # CRITICAL: Allow multiple messages in-flight per partition for speed
+    # Safe because output has retries and we commit only after success
+    # With 10 instances × 1 partition each, this allows high parallelism
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:100}
 
 pipeline:
   processors:
-    # Rate limit at 100 messages per second across all partitions
+    # Rate limit - increased for high throughput (adjust based on output Kafka capacity)
+    # With 10 parallel instances, total throughput = 10 × this rate
     - rate_limit:
         resource: kafka_input_rate_limit
 
@@ -165,36 +171,68 @@ pipeline:
           - Source: ${!json("source")}
           - Properties: ${!json("properties")}
 
+# OUTPUT RELIABILITY CONFIGURATION - HIGH SPEED MODE
+#
+# Optimized for 180M events across 10 partitions with 10 parallel instances:
+# 1. checkpoint_limit=100: Allow 100 messages in-flight per partition for speed
+# 2. Large batches (100 msgs or 1s): Reduce network round-trips
+# 3. High max_in_flight (64): Maximum parallel output requests per instance
+# 4. retry block: Automatic retries with fast backoff on transient failures
+# 5. ack_replicas=1 (default): Leader ack only for speed
+# 6. Reduced timeouts: Fail fast and retry rather than wait
+#
+# Throughput calculation: 10 instances × ~10k-50k msgs/sec each = 100k-500k msgs/sec total
+# 180M events ÷ 100k msgs/sec = ~30 minutes (conservative) to 3 minutes (optimistic)
+#
+# Note: Consumer-side deduplication handles any potential duplicates from retries
+# GUARANTEE: Messages are only acknowledged from input Kafka after successful write to output Kafka
 output:
-  kafka:
-    addresses:
-      - ${FLEXPRICE_OUTPUT_KAFKA_BROKERS}
+  # Wrap Kafka output in retry block to handle transient failures
+  retry:
+    # Fewer retries with faster backoff for high-speed mode
+    max_retries: ${FLEXPRICE_OUTPUT_KAFKA_MAX_RETRIES:3}
+    backoff:
+      initial_interval: ${FLEXPRICE_OUTPUT_KAFKA_RETRY_INITIAL_INTERVAL:100ms}
+      max_interval: ${FLEXPRICE_OUTPUT_KAFKA_RETRY_MAX_INTERVAL:2s}
+      max_elapsed_time: ${FLEXPRICE_OUTPUT_KAFKA_RETRY_MAX_ELAPSED:30s}
+    output:
+      kafka:
+        addresses:
+          - ${FLEXPRICE_OUTPUT_KAFKA_BROKERS}
 
-    topic: ${FLEXPRICE_OUTPUT_KAFKA_TOPIC:bento-flexprice-output}
+        topic: ${FLEXPRICE_OUTPUT_KAFKA_TOPIC:bento-flexprice-output}
 
-    key: ${!json("partition_key")}
+        key: ${!json("partition_key")}
 
-    tls:
-      enabled: ${FLEXPRICE_OUTPUT_KAFKA_TLS_ENABLED:true}
+        tls:
+          enabled: ${FLEXPRICE_OUTPUT_KAFKA_TLS_ENABLED:true}
 
-    sasl:
-      mechanism: ${FLEXPRICE_OUTPUT_KAFKA_SASL_MECHANISM:PLAIN}
-      user: ${FLEXPRICE_OUTPUT_KAFKA_SASL_USER}
-      password: ${FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD}
+        sasl:
+          mechanism: ${FLEXPRICE_OUTPUT_KAFKA_SASL_MECHANISM:PLAIN}
+          user: ${FLEXPRICE_OUTPUT_KAFKA_SASL_USER}
+          password: ${FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD}
 
-    client_id: ${FLEXPRICE_OUTPUT_KAFKA_CLIENT_ID:bento-billing-flexprice-output}
+        client_id: ${FLEXPRICE_OUTPUT_KAFKA_CLIENT_ID:bento-billing-flexprice-output}
 
-    batching:
-      count: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_SIZE:10}
-      period: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_PERIOD:2s}
+        # Maximum concurrent write requests for high throughput
+        # Bento default is 64, use that for maximum speed
+        max_in_flight: ${FLEXPRICE_OUTPUT_KAFKA_MAX_IN_FLIGHT:64}
 
-    max_in_flight: ${FLEXPRICE_OUTPUT_KAFKA_MAX_IN_FLIGHT:10}
+        # Reduced timeout - fail fast and retry rather than wait
+        timeout: ${FLEXPRICE_OUTPUT_KAFKA_TIMEOUT:10s}
+
+        # Large batches for high throughput
+        batching:
+          count: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_SIZE:100}
+          period: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_PERIOD:1s}
 
 rate_limit_resources:
   - label: kafka_input_rate_limit
     local:
-      count: ${KAFKA_INPUT_RATE_LIMIT:100}  # messages per interval
-      interval: 1s                           # per second
+      # High rate limit per instance (10 instances × 50k = 500k msgs/sec total)
+      # Adjust down if output Kafka can't handle the load
+      count: ${KAFKA_INPUT_RATE_LIMIT:50000}  # messages per interval
+      interval: 1s                             # per second
 
 logger:
   level: ${LOG_LEVEL:INFO}
