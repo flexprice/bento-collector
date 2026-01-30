@@ -90,8 +90,10 @@ pipeline:
           }
         }
 
-        if this.data != null && this.data.modelName.string().or("") != "" {
-          root.event_name = root.event_name + "-" + this.data.modelName.string().trim().lowercase()
+        # Only append model name when present and not JSON null (skip rather than append "null")
+        let modelStr = if this.data != null && this.data.modelName != null { this.data.modelName.string().trim().lowercase() } else { "" }
+        if $modelStr != "" && $modelStr != "null" {
+          root.event_name = root.event_name + "-" + $modelStr
         }
 
         # ---- Raw payload ----
