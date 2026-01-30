@@ -28,10 +28,19 @@ input:
 
     client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-raw-clickhouse}
 
-    commit_period: 1s
-    max_processing_period: 100ms
-    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:20}
-    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:20}
+    # Commit period: how often to commit offsets to Kafka
+    commit_period: ${KAFKA_COMMIT_PERIOD:10s}
+    
+    # Max processing period: max time messages can be pending before forced flush
+    max_processing_period: ${KAFKA_MAX_PROCESSING_PERIOD:120s}
+    
+    # Fetch buffer: number of messages to buffer from Kafka (larger = more throughput)
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:10000}
+    
+    # Checkpoint limit: CRITICAL FOR ZERO DATA LOSS
+    # Number of messages to process before committing offset
+    # Set to 1000 to ensure offsets committed only after successful ClickHouse writes
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:1000}
 
 pipeline:
   processors:
@@ -99,69 +108,82 @@ pipeline:
         root.field8 = this.referenceCost.string().or("")
 
 # ============================================================================
-# STEP 2: Batch and Insert into ClickHouse
+# STEP 2: Batch and Insert into ClickHouse with Retry
 # ============================================================================
-# - Batch up to 1000 events or flush after 1 second
+# - Batch up to 1000 events or flush after 500ms for high throughput
 # - Use native ClickHouse protocol (port 9000) for better performance
-# - 8 parallel connections for high throughput
-# - Auto-retry on failures
+# - 64 parallel connections for maximum throughput
+# - Automatic retry with exponential backoff for resilience
+# - ZERO DATA LOSS: Kafka offsets committed only after successful ClickHouse writes
 # ============================================================================
 output:
-  sql_insert:
-    driver: clickhouse
+  retry:
+    # Retry configuration for ClickHouse write failures
+    max_retries: ${CLICKHOUSE_MAX_RETRIES:3}
+    backoff:
+      initial_interval: ${CLICKHOUSE_RETRY_INITIAL_INTERVAL:100ms}
+      max_interval: ${CLICKHOUSE_RETRY_MAX_INTERVAL:2s}
+      max_elapsed_time: ${CLICKHOUSE_RETRY_MAX_ELAPSED:30s}
     
-    # Use native ClickHouse protocol (port 9000) - more efficient than HTTP
-    # DSN is provided as a complete connection string from environment variable
-    dsn: "${FLEXPRICE_CLICKHOUSE_DSN}"
-    
-    table: flexprice.raw_events
-    
-    columns:
-      - id
-      - tenant_id
-      - environment_id
-      - external_customer_id
-      - event_name
-      - source
-      - payload
-      - field1
-      - field2
-      - field3
-      - field4
-      - field5
-      - field6
-      - field7
-      - field8
-      - timestamp
-    
-    args_mapping: |
-      root = [
-        this.id,
-        this.tenant_id,
-        this.environment_id,
-        this.external_customer_id,
-        this.event_name,
-        this.source,
-        this.payload,
-        this.field1,
-        this.field2,
-        this.field3,
-        this.field4,
-        this.field5,
-        this.field6,
-        this.field7,
-        this.field8,
-        this.timestamp
-      ]
-    
-    batching:
-      count: ${CLICKHOUSE_BATCH_COUNT:1000}        # 500–1000 batch size (use 500 if traffic is low)
-      period: ${CLICKHOUSE_BATCH_PERIOD:1s}         # flush every second even if batch not full
-      jitter: 0.1        # avoids thundering herd
-    
-    max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}     # 8 parallel async inserts to ClickHouse
+    output:
+      sql_insert:
+        driver: clickhouse
+        
+        # Use native ClickHouse protocol (port 9000) - more efficient than HTTP
+        # DSN is provided as a complete connection string from environment variable
+        dsn: "${FLEXPRICE_CLICKHOUSE_DSN}"
+        
+        table: flexprice.raw_events
+        
+        columns:
+          - id
+          - tenant_id
+          - environment_id
+          - external_customer_id
+          - event_name
+          - source
+          - payload
+          - field1
+          - field2
+          - field3
+          - field4
+          - field5
+          - field6
+          - field7
+          - field8
+          - timestamp
+        
+        args_mapping: |
+          root = [
+            this.id,
+            this.tenant_id,
+            this.environment_id,
+            this.external_customer_id,
+            this.event_name,
+            this.source,
+            this.payload,
+            this.field1,
+            this.field2,
+            this.field3,
+            this.field4,
+            this.field5,
+            this.field6,
+            this.field7,
+            this.field8,
+            this.timestamp
+          ]
+        
+        batching:
+          count: ${CLICKHOUSE_BATCH_COUNT:500}          # Large batches for throughput
+          period: ${CLICKHOUSE_BATCH_PERIOD:500ms}      # Fast flush for low latency
+          jitter: 0.1                                    # Avoids thundering herd
+        
+        max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:64}   # High parallelism for speed
+        
+        # Connection timeout
+        init_statement: "SET max_execution_time = ${CLICKHOUSE_TIMEOUT:10}"
 
 logger:
-  level: ${LOG_LEVEL:INFO}
+  level: ${LOG_LEVEL:ERROR}  # ERROR level for production (no per-message logging)
   format: logfmt
   add_timestamp: true
