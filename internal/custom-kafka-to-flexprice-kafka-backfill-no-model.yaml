@@ -1,0 +1,251 @@
+# =============================================================================
+# BACKFILL: Kafka → Kafka — events with NO modelName only (~128M events)
+# =============================================================================
+# Use a SEPARATE consumer group so this runs independently from the main
+# pipeline. Reads same input topic from start, keeps only events that had
+# no data.modelName (previously skipped by the main job), writes to same
+# output topic. Does not affect main pipeline offsets or throughput.
+#
+# Same env vars as custom-kafka-to-flexprice-kafka.yaml; only defaults differ.
+# In ECS: use same task env and override:
+#   FLEXPRICE_KAFKA_CONSUMER_GROUP=bento-billing-flexprice-backfill-no-model-v1
+#   FLEXPRICE_OUTPUT_KAFKA_TOPIC=<same or different>  (optional)
+# =============================================================================
+
+input:
+  kafka:
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    topics:
+      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-billing-flexprice-backfill-no-model-v1}
+    start_from_oldest: true
+
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-billing-collector}-backfill-no-model
+
+    commit_period: ${KAFKA_COMMIT_PERIOD:5s}
+    max_processing_period: ${KAFKA_MAX_PROCESSING_PERIOD:60s}
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:1000}
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:100}
+
+pipeline:
+  processors:
+    - rate_limit:
+        resource: kafka_input_rate_limit
+
+    - mapping: |
+        meta.original_event = content().string()
+        meta.original_topic = meta("kafka_topic")
+        meta.original_partition = meta("kafka_partition")
+        meta.original_offset = meta("kafka_offset")
+
+        # Base validity (same as main pipeline)
+        let baseValid = (
+          this.orgId != null && this.orgId != "" &&
+          this.methodName != null && this.methodName != "" &&
+          ((this.providerName != null && this.providerName != "") || (this.serviceName != null && this.serviceName != "")) &&
+          this.id != null && this.id != "" &&
+          this.createdAt != null && this.createdAt != ""
+        )
+
+        # BACKFILL: keep only events with NO modelName (the ones that were skipped)
+        let hasModelName = (
+          this.data != null &&
+          this.data.modelName != null &&
+          this.data.modelName.string().or("") != "" &&
+          this.data.modelName.string().trim().lowercase() != "null"
+        )
+
+        root = if $baseValid && !$hasModelName { this } else { deleted() }
+
+    - mapping: |
+        root = {}
+
+        # Start with `data` fields (extract values from key-value objects, otherwise stringify)
+        root.properties = if this.data != null && this.data.type() == "object" {
+          this.data.map_each(v -> if v.type() == "object" && v.key != null && v.value != null {
+            v.value.string()
+          } else {
+            v.string()
+          })
+        } else {
+          {}
+        }
+
+        root.properties.resolvedProviderName = ""
+        if this.providerName != null && this.providerName != "" {
+          root.properties.resolvedProviderName = this.providerName.string().trim().lowercase()
+        } else if this.serviceName != null && this.serviceName != "" {
+          root.properties.resolvedProviderName = this.serviceName.string().trim().lowercase()
+        }
+
+        root.properties.resolvedModelName = ""
+        if root.properties.modelName != null && root.properties.modelName != "" {
+          root.properties.resolvedModelName = "-" + root.properties.modelName.string().trim().lowercase()
+        } else if this.data != null && this.data.modelName != null && this.data.modelName != "" {
+          root.properties.resolvedModelName = "-" + this.data.modelName.string().trim().lowercase()
+        }
+
+        root.properties.resolvedMethodName = ""
+        if this.methodName != null && this.methodName != "" {
+          if this.methodName == "BEDROCK_LLM" {
+            root.properties.resolvedMethodName = "-modeling"
+          } else {
+            root.properties.resolvedMethodName = "-" + this.methodName.string().trim().lowercase()
+          }
+        }
+
+        # Flexprice Event structure fields (matching Go Event struct)
+        root.id = this.id.string()
+        if env("FLEXPRICE_TENANT_ID") != null {
+          root.tenant_id = env("FLEXPRICE_TENANT_ID").string().or("")
+        } else {
+          root.tenant_id = ""
+        }
+        if env("FLEXPRICE_ENVIRONMENT_ID") != null {
+          root.environment_id = env("FLEXPRICE_ENVIRONMENT_ID").string().or("")
+        } else {
+          root.environment_id = ""
+        }
+
+        if env("FLEXPRICE_TENANT_ID") != null {
+          root.partition_key = env("FLEXPRICE_TENANT_ID").string().or("") + ":" + this.orgId.string()
+        } else {
+          root.partition_key = ""
+        }
+
+        root.external_customer_id = this.orgId.string()
+        root.event_name = root.properties.resolvedProviderName + root.properties.resolvedMethodName + root.properties.resolvedModelName
+        root.timestamp = this.createdAt.string()
+        if this.targetItemId != null { root.source = this.targetItemId.string() }
+
+        # Add selected top-level fields into properties
+        if this.byok != null {
+          root.properties.byok = this.byok.string()
+        }
+        if this.dataInterface != null { root.properties.dataInterface = this.dataInterface.string() }
+        if this.serviceName != null { root.properties.serviceName = this.serviceName.string() }
+        if this.providerName != null { root.properties.providerName = this.providerName.string() }
+        if this.referenceCost != null { root.properties.referenceCost = this.referenceCost.string() }
+        if this.methodName != null { root.properties.methodName = this.methodName.string() }
+        if this.targetItemType != null { root.properties.targetItemType = this.targetItemType.string() }
+        if this.targetItemId != null { root.properties.targetItemId = this.targetItemId.string() }
+        if this.referenceType != null { root.properties.referenceType = this.referenceType.string() }
+        if this.referenceId != null { root.properties.referenceId = this.referenceId.string() }
+        if this.startedAt != null { root.properties.startedAt = this.startedAt.string() }
+        if this.createdAt != null { root.properties.createdAt = this.createdAt.string() }
+        if this.updatedAt != null { root.properties.updatedAt = this.updatedAt.string() }
+        if this.endedAt != null { root.properties.endedAt = this.endedAt.string() }
+
+        # Initialize billable fields with empty strings
+        root.properties.billable_value = ""
+        root.properties.billable_unit = ""
+
+        # Add billable_value and billable_unit based on numCharacters or durationMS
+        if root.properties.numCharacters != null {
+          root.properties.billable_value = root.properties.numCharacters
+          root.properties.billable_unit = "characters"
+        } else if root.properties.durationMS != null {
+          root.properties.billable_value = root.properties.durationMS
+          root.properties.billable_unit = "milliseconds"
+        }
+
+        # Multiply billable_value by channels if both exist and are valid numbers > 0
+        if root.properties.billable_value != "" && root.properties.channels != null && root.properties.billable_value.number().catch(0) > 0 && root.properties.channels.number().catch(0) > 0 {
+          root.properties.billable_value = (root.properties.billable_value.number() * root.properties.channels.number()).string()
+        }
+
+        meta.tenant_id = root.tenant_id
+        meta.environment_id = root.environment_id
+
+    - log:
+        level: INFO
+        message: |
+          [KAFKA→KAFKA] Processing BillingEntry:
+          - Event ID: ${!json("id")}
+          - Tenant ID (JSON): ${!json("tenant_id")}
+          - Environment ID (JSON): ${!json("environment_id")}
+          - Partition Key (JSON): ${!json("partition_key")}
+          - Event Name: ${!json("event_name")}
+          - External Customer ID: ${!json("external_customer_id")}
+          - Timestamp: ${!json("timestamp")}
+          - Source: ${!json("source")}
+          - Properties: ${!json("properties")}
+
+# OUTPUT RELIABILITY CONFIGURATION - HIGH SPEED MODE
+#
+# Optimized for 180M events across 10 partitions with 10 parallel instances:
+# 1. checkpoint_limit=100: Allow 100 messages in-flight per partition for speed
+# 2. Large batches (100 msgs or 1s): Reduce network round-trips
+# 3. High max_in_flight (64): Maximum parallel output requests per instance
+# 4. retry block: Automatic retries with fast backoff on transient failures
+# 5. ack_replicas=1 (default): Leader ack only for speed
+# 6. Reduced timeouts: Fail fast and retry rather than wait
+#
+# Throughput calculation: 10 instances × ~10k-50k msgs/sec each = 100k-500k msgs/sec total
+# 180M events ÷ 100k msgs/sec = ~30 minutes (conservative) to 3 minutes (optimistic)
+#
+# Note: Consumer-side deduplication handles any potential duplicates from retries
+# GUARANTEE: Messages are only acknowledged from input Kafka after successful write to output Kafka
+output:
+  # Wrap Kafka output in retry block to handle transient failures
+  retry:
+    # Fewer retries with faster backoff for high-speed mode
+    max_retries: ${FLEXPRICE_OUTPUT_KAFKA_MAX_RETRIES:3}
+    backoff:
+      initial_interval: ${FLEXPRICE_OUTPUT_KAFKA_RETRY_INITIAL_INTERVAL:100ms}
+      max_interval: ${FLEXPRICE_OUTPUT_KAFKA_RETRY_MAX_INTERVAL:2s}
+      max_elapsed_time: ${FLEXPRICE_OUTPUT_KAFKA_RETRY_MAX_ELAPSED:30s}
+    output:
+      kafka:
+        addresses:
+          - ${FLEXPRICE_OUTPUT_KAFKA_BROKERS}
+
+        topic: ${FLEXPRICE_OUTPUT_KAFKA_TOPIC:bento-flexprice-output}
+
+        key: ${!json("partition_key")}
+
+        tls:
+          enabled: ${FLEXPRICE_OUTPUT_KAFKA_TLS_ENABLED:true}
+
+        sasl:
+          mechanism: ${FLEXPRICE_OUTPUT_KAFKA_SASL_MECHANISM:PLAIN}
+          user: ${FLEXPRICE_OUTPUT_KAFKA_SASL_USER}
+          password: ${FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD}
+
+        client_id: ${FLEXPRICE_OUTPUT_KAFKA_CLIENT_ID:bento-billing-flexprice-output}
+
+        # Maximum concurrent write requests for high throughput
+        # Bento default is 64, use that for maximum speed
+        max_in_flight: ${FLEXPRICE_OUTPUT_KAFKA_MAX_IN_FLIGHT:64}
+
+        # Reduced timeout - fail fast and retry rather than wait
+        timeout: ${FLEXPRICE_OUTPUT_KAFKA_TIMEOUT:10s}
+
+        # Large batches for high throughput
+        batching:
+          count: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_SIZE:100}
+          period: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_PERIOD:1s}
+
+rate_limit_resources:
+  - label: kafka_input_rate_limit
+    local:
+      # High rate limit per instance (10 instances × 50k = 500k msgs/sec total)
+      # Adjust down if output Kafka can't handle the load
+      count: ${KAFKA_INPUT_RATE_LIMIT:50000} # messages per interval
+      interval: 1s # per second
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true
