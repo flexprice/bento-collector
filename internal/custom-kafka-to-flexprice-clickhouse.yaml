@@ -16,7 +16,7 @@ input:
       - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
 
     consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-raw-clickhouse-v1}
-    start_from_oldest: true
+    start_from_oldest: false
 
     tls:
       enabled: true
@@ -35,6 +35,13 @@ input:
 
 pipeline:
   processors:
+    # ============================================================================
+    # STEP 0: Store original raw event for Kafka output
+    # ============================================================================
+    - mapping: |
+        # Store the original raw event in metadata for later use
+        meta original_raw_event = this.string()
+
     # ============================================================================
     # STEP 1: Transform raw event into ClickHouse schema
     # ============================================================================
@@ -99,67 +106,109 @@ pipeline:
         root.field8 = this.referenceCost.string().or("")
 
 # ============================================================================
-# STEP 2: Batch and Insert into ClickHouse
+# STEP 2: Dual Output - ClickHouse and Kafka
 # ============================================================================
-# - Batch up to 1000 events or flush after 1 second
-# - Use native ClickHouse protocol (port 9000) for better performance
-# - 8 parallel connections for high throughput
-# - Auto-retry on failures
+# - ClickHouse: Batch up to 1000 events or flush after 1 second
+# - Kafka: Batch up to 100 raw events and send to raw_events topic
 # ============================================================================
 output:
-  sql_insert:
-    driver: clickhouse
-    
-    # Use native ClickHouse protocol (port 9000) - more efficient than HTTP
-    # DSN is provided as a complete connection string from environment variable
-    dsn: "${FLEXPRICE_CLICKHOUSE_DSN}"
-    
-    table: flexprice.raw_events
-    
-    columns:
-      - id
-      - tenant_id
-      - environment_id
-      - external_customer_id
-      - event_name
-      - source
-      - payload
-      - field1
-      - field2
-      - field3
-      - field4
-      - field5
-      - field6
-      - field7
-      - field8
-      - timestamp
-    
-    args_mapping: |
-      root = [
-        this.id,
-        this.tenant_id,
-        this.environment_id,
-        this.external_customer_id,
-        this.event_name,
-        this.source,
-        this.payload,
-        this.field1,
-        this.field2,
-        this.field3,
-        this.field4,
-        this.field5,
-        this.field6,
-        this.field7,
-        this.field8,
-        this.timestamp
-      ]
-    
-    batching:
-      count: ${CLICKHOUSE_BATCH_COUNT:1000}        # 500–1000 batch size (use 500 if traffic is low)
-      period: ${CLICKHOUSE_BATCH_PERIOD:1s}         # flush every second even if batch not full
-      jitter: 0.1        # avoids thundering herd
-    
-    max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}     # 8 parallel async inserts to ClickHouse
+  broker:
+    outputs:
+      # ============================================================================
+      # Output 1: ClickHouse (existing behavior)
+      # ============================================================================
+      - sql_insert:
+          driver: clickhouse
+          
+          # Use native ClickHouse protocol (port 9000) - more efficient than HTTP
+          # DSN is provided as a complete connection string from environment variable
+          dsn: "${FLEXPRICE_CLICKHOUSE_DSN}"
+          
+          table: flexprice.raw_events
+          
+          columns:
+            - id
+            - tenant_id
+            - environment_id
+            - external_customer_id
+            - event_name
+            - source
+            - payload
+            - field1
+            - field2
+            - field3
+            - field4
+            - field5
+            - field6
+            - field7
+            - field8
+            - timestamp
+          
+          args_mapping: |
+            root = [
+              this.id,
+              this.tenant_id,
+              this.environment_id,
+              this.external_customer_id,
+              this.event_name,
+              this.source,
+              this.payload,
+              this.field1,
+              this.field2,
+              this.field3,
+              this.field4,
+              this.field5,
+              this.field6,
+              this.field7,
+              this.field8,
+              this.timestamp
+            ]
+          
+          batching:
+            count: ${CLICKHOUSE_BATCH_COUNT:1000}        # 500–1000 batch size (use 500 if traffic is low)
+            period: ${CLICKHOUSE_BATCH_PERIOD:1s}         # flush every second even if batch not full
+            jitter: 0.1        # avoids thundering herd
+          
+          max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}     # 8 parallel async inserts to ClickHouse
+
+      # ============================================================================
+      # Output 2: Kafka raw_events topic (new behavior)
+      # ============================================================================
+      # - Batch 100 raw events into {"data": [array]} format
+      # - Send to raw_events topic for FlexPrice consumer to process
+      # ============================================================================
+      - kafka:
+          addresses:
+            - ${FLEXPRICE_KAFKA_BROKERS}
+
+          topic: ${RAW_EVENTS_KAFKA_TOPIC:raw_events}
+
+          tls:
+            enabled: true
+
+          sasl:
+            mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
+            user: ${FLEXPRICE_KAFKA_SASL_USER}
+            password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+          client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-raw-events-producer}
+
+          # Batch raw events into array of 100
+          batching:
+            count: ${RAW_EVENTS_KAFKA_BATCH_COUNT:100}
+            period: ${RAW_EVENTS_KAFKA_BATCH_PERIOD:15s}
+            processors:
+              # Step 1: Restore original raw event from metadata
+              - mapping: |
+                  root = meta("original_raw_event").parse_json()
+              # Step 2: Collect all events into a JSON array
+              - archive:
+                  format: json_array
+              # Step 3: Wrap in {"data": [...]} structure
+              - mapping: |
+                  root.data = this
+
+          max_in_flight: ${RAW_EVENTS_KAFKA_MAX_IN_FLIGHT:10}
 
 logger:
   level: ${LOG_LEVEL:INFO}
