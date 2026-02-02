@@ -16,7 +16,7 @@ input:
       - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
 
     consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-raw-clickhouse-v1}
-    start_from_oldest: false
+    start_from_oldest: true
 
     tls:
       enabled: true
