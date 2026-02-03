@@ -1,11 +1,12 @@
 # ============================================================================
-# Kafka to ClickHouse Pipeline - Raw Events
+# Kafka to ClickHouse Pipeline - Raw Events (ENHANCED)
 # ============================================================================
-# Flow: Kafka → Transform → Batch → ClickHouse
+# Flow: Kafka → Transform → Batch → ClickHouse + Kafka with tenant/env metadata
 # 1. Consume events from Kafka topic
 # 2. Transform and normalize event data
 # 3. Batch events (1000 per batch or 1s timeout)
 # 4. Insert into ClickHouse using native protocol
+# 5. Send to Kafka with tenant/environment metadata
 
 input:
   kafka:
@@ -41,6 +42,10 @@ pipeline:
     - mapping: |
         # Store the original raw event in metadata for later use
         meta original_raw_event = this.string()
+        
+        # Store tenant and environment IDs in metadata for Kafka output
+        meta tenant_id = env("FLEXPRICE_TENANT_ID").string().or("")
+        meta environment_id = env("FLEXPRICE_ENVIRONMENT_ID").string().or("")
 
     # ============================================================================
     # STEP 1: Transform raw event into ClickHouse schema
@@ -109,7 +114,7 @@ pipeline:
 # STEP 2: Dual Output - ClickHouse and Kafka
 # ============================================================================
 # - ClickHouse: Batch up to 1000 events or flush after 1 second
-# - Kafka: Batch up to 100 raw events and send to raw_events topic
+# - Kafka: Batch up to 100 raw events with tenant/environment 
 # ============================================================================
 output:
   broker:
@@ -172,10 +177,11 @@ output:
           max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}     # 8 parallel async inserts to ClickHouse
 
       # ============================================================================
-      # Output 2: Kafka raw_events topic (new behavior)
+      # Output 2: Kafka raw_events topic (ENHANCED with tenant/environment)
       # ============================================================================
-      # - Batch 100 raw events into {"data": [array]} format
+      # - Batch 100 raw events into {"data": [...], "tenant_id": "...", "environment_id": "..."} format
       # - Send to raw_events topic for FlexPrice consumer to process
+      # - Includes tenant and environment metadata for multi-tenant support
       # ============================================================================
       - kafka:
           addresses:
@@ -204,9 +210,11 @@ output:
               # Step 2: Collect all events into a JSON array
               - archive:
                   format: json_array
-              # Step 3: Wrap in {"data": [...]} structure
+              # Step 3: Wrap in {"data": [...], "tenant_id": "...", "environment_id": "..."} structure
               - mapping: |
                   root.data = this
+                  root.tenant_id = meta("tenant_id").string().or("")
+                  root.environment_id = meta("environment_id").string().or("")
 
           max_in_flight: ${RAW_EVENTS_KAFKA_MAX_IN_FLIGHT:10}
 
