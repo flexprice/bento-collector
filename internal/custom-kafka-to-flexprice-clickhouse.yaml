@@ -185,24 +185,24 @@ output:
       # ============================================================================
       - kafka:
           addresses:
-            - ${FLEXPRICE_KAFKA_BROKERS}
+            - ${FLEXPRICE_OUTPUT_KAFKA_BROKERS}
 
-          topic: ${RAW_EVENTS_KAFKA_TOPIC:raw_events}
+          topic: ${FLEXPRICE_OUTPUT_KAFKA_TOPIC:raw_events}
 
           tls:
-            enabled: true
+            enabled: ${FLEXPRICE_OUTPUT_KAFKA_TLS_ENABLED:true}
 
           sasl:
-            mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
-            user: ${FLEXPRICE_KAFKA_SASL_USER}
-            password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+            mechanism: ${FLEXPRICE_OUTPUT_KAFKA_SASL_MECHANISM:PLAIN}
+            user: ${FLEXPRICE_OUTPUT_KAFKA_SASL_USER}
+            password: ${FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD}
 
-          client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-raw-events-producer}
+          client_id: ${FLEXPRICE_OUTPUT_KAFKA_CLIENT_ID:bento-raw-events-producer}
 
           # Batch raw events into array of 100
           batching:
-            count: ${RAW_EVENTS_KAFKA_BATCH_COUNT:100}
-            period: ${RAW_EVENTS_KAFKA_BATCH_PERIOD:15s}
+            count: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_SIZE:100}
+            period: ${FLEXPRICE_OUTPUT_KAFKA_BATCH_PERIOD:15s}
             processors:
               # Step 1: Restore original raw event from metadata
               - mapping: |
@@ -216,7 +216,7 @@ output:
                   root.tenant_id = meta("tenant_id").string().or("")
                   root.environment_id = meta("environment_id").string().or("")
 
-          max_in_flight: ${RAW_EVENTS_KAFKA_MAX_IN_FLIGHT:10}
+          max_in_flight: ${FLEXPRICE_OUTPUT_KAFKA_MAX_IN_FLIGHT:10}
 
 logger:
   level: ${LOG_LEVEL:INFO}
