@@ -1,0 +1,228 @@
+# ============================================================================
+# Kafka to ClickHouse Pipeline v2 - Zero Data Loss with Org Filtering
+# ============================================================================
+#
+# Key improvements over v1:
+#   1. Single output (ClickHouse only) — no broker fan_out coupling
+#   2. try/catch in pipeline — transform errors are logged and acknowledged
+#   3. retry + fallback on output — ClickHouse write errors retried 5x then logged
+#   4. Optional FILTER_ORG_IDS for replaying/validating specific orgs
+#   5. Safer timestamp parsing with inline .catch() fallback
+#
+# Error handling guarantees:
+#   - Transform errors → TRANSFORM_ERROR logged with full raw event, message ack'd
+#   - ClickHouse write errors → retried 5x with backoff, then CLICKHOUSE_WRITE_FAILED
+#     logged with full data, message ack'd
+#   - Pipeline NEVER stalls on poison messages
+#   - Every Kafka message is either written to ClickHouse OR logged as an error
+#
+# Usage:
+#   Normal mode:  FILTER_ORG_IDS unset or ""   → processes ALL events
+#   Replay mode:  FILTER_ORG_IDS="org1,org2"   → only processes matching orgIds
+#                 Use a NEW consumer group for replay (reads from beginning)
+#
+# Replay performance (300-400M events, filtering to ~500K):
+#   - Non-matching events are deleted() immediately (no transform, no write)
+#   - fetch_buffer_cap=10000 for fast consumption
+#   - Bottleneck is Kafka read speed, not pipeline processing
+# ============================================================================
+
+input:
+  kafka:
+    addresses:
+      - ${FLEXPRICE_KAFKA_BROKERS}
+
+    topics:
+      - ${FLEXPRICE_KAFKA_TOPIC:bento-testing}
+
+    consumer_group: ${FLEXPRICE_KAFKA_CONSUMER_GROUP:bento-raw-clickhouse-v2}
+    start_from_oldest: true
+
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
+      user: ${FLEXPRICE_KAFKA_SASL_USER}
+      password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+    client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-raw-clickhouse-v2}
+
+    commit_period: ${KAFKA_COMMIT_PERIOD:10s}
+    max_processing_period: ${KAFKA_MAX_PROCESSING_PERIOD:120s}
+    fetch_buffer_cap: ${KAFKA_FETCH_BUFFER_CAP:10000}
+    checkpoint_limit: ${KAFKA_CHECKPOINT_LIMIT:10000}
+
+pipeline:
+  processors:
+    # ========================================================================
+    # STEP 0: Org filter (applied FIRST for fast skip in replay mode)
+    # ========================================================================
+    # Set FILTER_ORG_IDS="org1,org2" to only process those orgs.
+    # Leave empty or unset to process all events.
+    # Non-matching messages are immediately acknowledged and skipped.
+    # ========================================================================
+    - mapping: |
+        let filter_orgs = env("FILTER_ORG_IDS").or("")
+        if $filter_orgs != "" {
+          let current_org = this.orgId.string().or("")
+          if !$filter_orgs.split(",").contains($current_org) {
+            root = deleted()
+          }
+        }
+
+    # ========================================================================
+    # STEP 1: Preserve raw event + Kafka metadata for error logging
+    # ========================================================================
+    - mapping: |
+        meta raw_event = content().string()
+        meta kafka_partition_str = meta("kafka_partition")
+        meta kafka_offset_str = meta("kafka_offset")
+
+    # ========================================================================
+    # STEP 2: Transform with error handling (try/catch)
+    # ========================================================================
+    # On success: transformed message flows to ClickHouse output
+    # On failure: error logged with full raw event, message acknowledged
+    # ========================================================================
+    - try:
+        - mapping: |
+            root = {}
+
+            root.id = this.id.string().or(uuid_v4())
+            root.tenant_id = env("FLEXPRICE_TENANT_ID").string().or("")
+            root.environment_id = env("FLEXPRICE_ENVIRONMENT_ID").string().or("")
+            root.external_customer_id = this.orgId.string().or("")
+            root.source = this.targetItemId.string().or("")
+
+            # Timestamp: try ISO 8601 parse, fall back to current time on parse failure
+            root.timestamp = if this.createdAt != null && this.createdAt.string().or("") != "" && this.createdAt.string() != "null" {
+              this.createdAt.ts_parse("2006-01-02T15:04:05.999Z07:00").catch(timestamp_unix()).ts_format("2006-01-02 15:04:05.999999")
+            } else {
+              timestamp_unix().ts_format("2006-01-02 15:04:05.999999")
+            }
+
+            # ---- Build event_name ----
+            root.event_name = ""
+
+            if this.providerName.string().or("") != "" {
+              root.event_name = this.providerName.string().trim().lowercase()
+            } else if this.serviceName.string().or("") != "" {
+              root.event_name = this.serviceName.string().trim().lowercase()
+            }
+
+            if this.methodName.string().or("") != "" {
+              if this.methodName.string() == "BEDROCK_LLM" {
+                root.event_name = root.event_name + "-modeling"
+              } else {
+                root.event_name = root.event_name + "-" + this.methodName.string().trim().lowercase()
+              }
+            }
+
+            let modelStr = if this.data != null && this.data.modelName != null { this.data.modelName.string().trim().lowercase() } else { "" }
+            if $modelStr != "" && $modelStr != "null" {
+              root.event_name = root.event_name + "-" + $modelStr
+            }
+
+            # ---- Raw payload ----
+            root.payload = this.string()
+
+            # ---- Flexible analytics fields ----
+            root.field1 = this.providerName.string().or("")
+            root.field2 = if this.data != null { this.data.modelName.string().or("") } else { "" }
+            root.field3 = this.methodName.string().or("")
+            root.field4 = this.byok.string().or("")
+            root.field5 = this.dataInterface.string().or("")
+            root.field6 = this.referenceType.string().or("")
+            root.field7 = this.targetItemType.string().or("")
+            root.field8 = this.referenceCost.string().or("")
+
+    - catch:
+        - log:
+            level: ERROR
+            message: "TRANSFORM_ERROR error=\"${!error()}\" partition=${!meta(\"kafka_partition_str\")} offset=${!meta(\"kafka_offset_str\")} raw=${!meta(\"raw_event\")}"
+        - mapping: |
+            root = deleted()
+
+# ============================================================================
+# Output: ClickHouse with retry + fallback error logging
+# ============================================================================
+# 1. sql_insert wrapped in retry (5 attempts, exponential backoff)
+# 2. If all retries fail → dlq_error_log logs the batch and acknowledges
+#
+# Trade-off: if one bad record poisons a batch of 1000, all 1000 are logged
+# as failed (they remain in Kafka within retention for manual replay).
+# When upgrading to a real DLQ, replace dlq_error_log with a Kafka output.
+# ============================================================================
+output:
+  fallback:
+    - retry:
+        max_retries: 5
+        backoff:
+          initial_interval: 500ms
+          max_interval: 30s
+        output:
+          sql_insert:
+            driver: clickhouse
+            dsn: "${FLEXPRICE_CLICKHOUSE_DSN}"
+            table: flexprice.raw_events
+
+            columns:
+              - id
+              - tenant_id
+              - environment_id
+              - external_customer_id
+              - event_name
+              - source
+              - payload
+              - field1
+              - field2
+              - field3
+              - field4
+              - field5
+              - field6
+              - field7
+              - field8
+              - timestamp
+
+            args_mapping: |
+              root = [
+                this.id,
+                this.tenant_id,
+                this.environment_id,
+                this.external_customer_id,
+                this.event_name,
+                this.source,
+                this.payload,
+                this.field1,
+                this.field2,
+                this.field3,
+                this.field4,
+                this.field5,
+                this.field6,
+                this.field7,
+                this.field8,
+                this.timestamp
+              ]
+
+            batching:
+              count: ${CLICKHOUSE_BATCH_COUNT:1000}
+              period: ${CLICKHOUSE_BATCH_PERIOD:1s}
+              jitter: 0.1
+
+            max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}
+
+    - resource: dlq_error_log
+
+output_resources:
+  - label: dlq_error_log
+    processors:
+      - log:
+          level: ERROR
+          message: "CLICKHOUSE_WRITE_FAILED partition=${!meta(\"kafka_partition_str\")} offset=${!meta(\"kafka_offset_str\")} id=${!json(\"id\")} event_name=${!json(\"event_name\")} raw=${!meta(\"raw_event\")}"
+    drop: {}
+
+logger:
+  level: ${LOG_LEVEL:ERROR}
+  format: logfmt
+  add_timestamp: true
