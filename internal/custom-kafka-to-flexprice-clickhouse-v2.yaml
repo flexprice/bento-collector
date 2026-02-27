@@ -5,16 +5,15 @@
 # Key improvements over v1:
 #   1. Single output (ClickHouse only) — no broker fan_out coupling
 #   2. try/catch in pipeline — transform errors are logged and acknowledged
-#   3. retry + fallback on output — ClickHouse write errors retried 5x then logged
+#   3. retry + fallback on output — ClickHouse write errors retried 5x then sent to Kafka DLQ
 #   4. Optional FILTER_ORG_IDS for replaying/validating specific orgs
 #   5. Safer timestamp parsing with inline .catch() fallback
 #
 # Error handling guarantees:
 #   - Transform errors → TRANSFORM_ERROR logged with full raw event, message ack'd
-#   - ClickHouse write errors → retried 5x with backoff, then CLICKHOUSE_WRITE_FAILED
-#     logged with full data, message ack'd
+#   - ClickHouse write errors → retried 5x with backoff, then sent to Kafka DLQ topic
 #   - Pipeline NEVER stalls on poison messages
-#   - Every Kafka message is either written to ClickHouse OR logged as an error
+#   - Every Kafka message is either written to ClickHouse OR sent to DLQ
 #
 # Usage:
 #   Normal mode:  FILTER_ORG_IDS unset or ""   → processes ALL events
@@ -145,14 +144,13 @@ pipeline:
             root = deleted()
 
 # ============================================================================
-# Output: ClickHouse with retry + fallback error logging
+# Output: ClickHouse with retry + fallback to Kafka DLQ
 # ============================================================================
 # 1. sql_insert wrapped in retry (5 attempts, exponential backoff)
-# 2. If all retries fail → dlq_error_log logs the batch and acknowledges
+# 2. If all retries fail → message sent to Kafka DLQ topic
 #
-# Trade-off: if one bad record poisons a batch of 1000, all 1000 are logged
-# as failed (they remain in Kafka within retention for manual replay).
-# When upgrading to a real DLQ, replace dlq_error_log with a Kafka output.
+# Trade-off: if one bad record poisons a batch of 1000, all 1000 are sent to DLQ
+# (they remain in Kafka within retention for manual replay).
 # ============================================================================
 output:
   fallback:
@@ -212,15 +210,39 @@ output:
 
             max_in_flight: ${CLICKHOUSE_MAX_IN_FLIGHT:8}
 
-    - resource: dlq_error_log
+    - resource: dlq_kafka_output
 
+# ============================================================================
+# DLQ Output Resource: Kafka Dead Letter Queue
+# ============================================================================
+# Failed messages (after all retries exhausted) are sent to a Kafka DLQ topic.
+# Uses the same input Kafka connection credentials.
+# ============================================================================
 output_resources:
-  - label: dlq_error_log
+  - label: dlq_kafka_output
     processors:
       - log:
           level: ERROR
-          message: "CLICKHOUSE_WRITE_FAILED partition=${!meta(\"kafka_partition_str\")} offset=${!meta(\"kafka_offset_str\")} id=${!json(\"id\")} event_name=${!json(\"event_name\")} raw=${!meta(\"raw_event\")}"
-    drop: {}
+          message: "CLICKHOUSE_WRITE_FAILED partition=${!meta(\"kafka_partition_str\")} offset=${!meta(\"kafka_offset_str\")} id=${!json(\"id\").catch(\"unknown\")} event_name=${!json(\"event_name\").catch(\"unknown\")} error=\"${!error()}\" raw=${!meta(\"raw_event\")}"
+    kafka:
+      addresses:
+        - ${FLEXPRICE_KAFKA_BROKERS}
+
+      topic: ${FLEXPRICE_KAFKA_DLQ_TOPIC:bento-clickhouse-dlq}
+
+      tls:
+        enabled: true
+
+      sasl:
+        mechanism: ${FLEXPRICE_KAFKA_SASL_MECHANISM:PLAIN}
+        user: ${FLEXPRICE_KAFKA_SASL_USER}
+        password: ${FLEXPRICE_KAFKA_SASL_PASSWORD}
+
+      client_id: ${FLEXPRICE_KAFKA_CLIENT_ID:bento-clickhouse-dlq-producer}
+
+      batching:
+        count: 10
+        period: 1s
 
 logger:
   level: ${LOG_LEVEL:ERROR}
