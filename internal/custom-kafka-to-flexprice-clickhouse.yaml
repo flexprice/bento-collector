@@ -271,7 +271,7 @@ output_resources:
     processors:
       - log:
           level: ERROR
-          message: "DLQ_WRITE partition=${!meta(\"kafka_partition_str\")} offset=${!meta(\"kafka_offset_str\")} id=${!json(\"id\").catch(\"unknown\")} event_name=${!json(\"event_name\").catch(\"unknown\")} error=\"${!error()}\""
+          message: "DLQ_WRITE partition=${!meta(\"kafka_partition_str\")} offset=${!meta(\"kafka_offset_str\")} id=${!json(\"id\").catch(\"unknown\")} event_name=${!json(\"event_name\").catch(\"unknown\")} error=\"${!error()}\" raw=${!meta(\"original_raw_event\")}"
     kafka:
       addresses:
         - ${FLEXPRICE_KAFKA_BROKERS}
