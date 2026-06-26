@@ -1,5 +1,6 @@
 # Dockerfile.ecs
-# Optimized Dockerfile for AWS ECS deployment (ARM64)
+# Optimized Dockerfile for container deployment (multi-arch)
+# Defaults to host/buildx target arch; pass --platform to cross-build.
 # syntax=docker/dockerfile:1.4
 
 ARG GO_VERSION=1.25.5
@@ -8,7 +9,11 @@ ARG ALPINE_VERSION=3.23
 #####################################
 # 1) Builder stage
 #####################################
-FROM --platform=linux/arm64 golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+
+# Provided automatically by buildx
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /build
 
@@ -26,14 +31,14 @@ COPY . .
 # Build the binary with optimizations
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" -trimpath \
       -o bento-flexprice main.go
 
 #####################################
 # 2) Runtime stage
 #####################################
-FROM --platform=linux/arm64 alpine:${ALPINE_VERSION} AS runtime
+FROM alpine:${ALPINE_VERSION} AS runtime
 
 WORKDIR /app
 

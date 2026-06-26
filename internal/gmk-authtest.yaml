@@ -1,0 +1,62 @@
+# ============================================================================
+# GMK OAUTHBEARER Auth Smoke Test
+# ============================================================================
+# Purpose:
+#   Prove that the gcp_managed_kafka_oauth cache plugin can authenticate to
+#   Google Managed Kafka (GMK) using OAUTHBEARER. This config connects to a
+#   DEDICATED throwaway topic, consumes any available messages, and immediately
+#   drops them. No data is written anywhere.
+#
+# Why drop output:
+#   Zero pollution guarantee — the drop output discards every message in memory.
+#   A successful connection + poll proves auth works; no topic or store is
+#   written to.
+#
+# Required env vars:
+#   GMK_AUTHTEST_BROKERS   — GMK bootstrap broker(s), e.g.
+#                            bootstrap.your-cluster.us-central1.managedkafka.googleapis.com:9092
+#   GMK_AUTHTEST_TOPIC     — (optional) throwaway topic name; default: bento-authtest
+#   GMK_AUTHTEST_GROUP     — (optional) consumer group; default: bento-gmk-authtest
+#
+# How to run:
+#   bento -c internal/gmk-authtest.yaml
+#
+# Authentication:
+#   Must run with Workload Identity (GKE) or local gcloud ADC granting
+#   roles/managedkafka.client on the GMK cluster. The cache plugin calls
+#   Application Default Credentials automatically — no explicit key file needed.
+#
+# IMPORTANT: Do NOT point GMK_AUTHTEST_BROKERS or GMK_AUTHTEST_TOPIC at any
+#   production topic. This config is strictly for auth validation.
+# ============================================================================
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true
+
+cache_resources:
+  - label: gmk_token
+    gcp_managed_kafka_oauth: {}
+
+input:
+  kafka:
+    addresses:
+      - ${GMK_AUTHTEST_BROKERS}
+
+    topics:
+      - ${GMK_AUTHTEST_TOPIC:bento-authtest}
+
+    consumer_group: ${GMK_AUTHTEST_GROUP:bento-gmk-authtest}
+    start_from_oldest: false
+
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: OAUTHBEARER
+      token_cache: gmk_token
+      token_key: token
+
+output:
+  drop: {}
