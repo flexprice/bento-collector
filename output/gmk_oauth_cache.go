@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
@@ -45,9 +46,11 @@ import (
 type gmkOAuthCache struct {
 	src oauth2.TokenSource
 	// principal is the service-account email used as the JWT `sub`. When empty
-	// it is resolved lazily from the metadata server on first Get() call and
-	// cached thereafter.
-	principal string
+	// at construction it is resolved lazily via principalOnce on the first Get()
+	// call and cached thereafter.
+	principal     string
+	principalOnce sync.Once
+	principalErr  error
 }
 
 // gmkJWTHeader is the fixed OAUTHBEARER header GMK requires. The alg value is
@@ -59,10 +62,12 @@ var gmkJWTHeader = gmkMustB64JSON(map[string]string{"typ": "JWT", "alg": "GOOG_O
 func gmkOAuthCacheSpec() *service.ConfigSpec {
 	return service.NewConfigSpec().
 		Summary("Returns Google Managed Kafka (GMK) OAUTHBEARER tokens for use as a token_cache on the kafka output.").
-		Description("Wraps Application Default Credentials (Workload Identity on GKE, gcloud locally) and " +
-			"builds the Google-specific three-segment OAUTHBEARER token that GMK brokers require. " +
+		Description("Wraps Application Default Credentials and builds the Google-specific three-segment OAUTHBEARER token that GMK brokers require. " +
 			"Wire this cache as the sasl.token_cache on a kafka output configured with mechanism OAUTHBEARER. " +
-			"The Get() key is ignored — a fresh (or cached-until-expiry) token is returned on every call.").
+			"The Get() key is ignored — a fresh (or cached-until-expiry) token is returned on every call. " +
+			"On GKE with Workload Identity the service-account email is resolved automatically from the metadata server. " +
+			"In all other environments (local dev, non-GCE) you MUST set GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL to the SA email, " +
+			"because local ADC tokens do not carry the SA email reliably.").
 		Field(service.NewStringListField("scopes").
 			Description("OAuth2 scopes to request. Defaults to the cloud-platform scope required by GMK.").
 			Default([]any{"https://www.googleapis.com/auth/cloud-platform"}))
@@ -153,20 +158,32 @@ func (c *gmkOAuthCache) Close(_ context.Context) error {
 }
 
 // resolvePrincipal returns the service-account email for the JWT `sub`. It is
-// cached after the first successful lookup so the metadata server is not hit on
-// every token build.
+// resolved at most once (sync.Once) so concurrent Get() calls during a broker
+// reconnect fan-out do not race on c.principal or issue duplicate metadata
+// lookups.
 func (c *gmkOAuthCache) resolvePrincipal() (string, error) {
-	if c.principal != "" {
-		return c.principal, nil
-	}
-	// Under Workload Identity the access token does not carry the SA email, so
-	// fetch it from the metadata server (the impersonated GSA's default SA).
-	email, err := metadata.Email("default")
-	if err != nil {
-		return "", fmt.Errorf("query metadata server for SA email (set GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL to override): %w", err)
-	}
-	c.principal = email
-	return email, nil
+	c.principalOnce.Do(func() {
+		if c.principal != "" {
+			// Already set at construction (e.g. from GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL).
+			return
+		}
+		if !metadata.OnGCE() {
+			// No metadata server is reachable (local dev, non-GCE). The env var
+			// is the only reliable source of the SA email outside GKE.
+			c.principalErr = fmt.Errorf("not running on GCE/GKE and GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL is unset — " +
+				"set GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL to the service-account email to use as the OAUTHBEARER principal")
+			return
+		}
+		// Under Workload Identity the access token does not carry the SA email,
+		// so fetch it from the metadata server (the bound GSA's default SA).
+		email, err := metadata.Email("default")
+		if err != nil {
+			c.principalErr = fmt.Errorf("query metadata server for SA email (set GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL to override): %w", err)
+			return
+		}
+		c.principal = email
+	})
+	return c.principal, c.principalErr
 }
 
 // gmkMustB64JSON marshals v to JSON and base64url-encodes it (no padding).

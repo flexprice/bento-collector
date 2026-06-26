@@ -125,6 +125,44 @@ func TestGetIgnoresKey(t *testing.T) {
 	}
 }
 
+// TestResolvePrincipalLocalRequiresEnv verifies that resolvePrincipal() returns
+// an actionable error mentioning GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL when the
+// principal was not set at construction. This test only runs when NOT on GCE
+// (i.e. local dev); on a real GCE/GKE host the metadata path would be taken
+// instead and this assertion would not be reachable.
+func TestResolvePrincipalLocalRequiresEnv(t *testing.T) {
+	// Skip on GCE/GKE where the metadata server IS reachable — the local-error
+	// branch is not exercised there.
+	// We import metadata indirectly through the package; OnGCE is checked in
+	// resolvePrincipal itself. Instead we just call resolvePrincipal directly
+	// and let the function decide. If we're on GCE the call would hit the
+	// metadata server instead of returning the local error, which would make the
+	// assertion below incorrect. Guard with a skip.
+	//
+	// We can't easily force OnGCE()=false in a unit test without mocking the
+	// metadata package, so skip rather than over-engineer.
+	t.Log("TestResolvePrincipalLocalRequiresEnv: calling resolvePrincipal with empty principal")
+
+	cache := &gmkOAuthCache{
+		src: oauth2.ReuseTokenSource(nil, staticTokenSource{&oauth2.Token{
+			AccessToken: "tok",
+			Expiry:      time.Now().Add(time.Hour),
+		}}),
+		// principal intentionally empty — should trigger local-error or metadata path.
+	}
+
+	_, err := cache.resolvePrincipal()
+	if err == nil {
+		// We are likely on GCE/GKE and got an email from the metadata server — that
+		// is correct behaviour; the test cannot assert the local-error branch here.
+		t.Skip("running on GCE/GKE — metadata path taken, local-error branch not exercised")
+	}
+	const wantSubstr = "GOOGLE_MANAGED_KAFKA_AUTH_PRINCIPAL"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Errorf("error %q does not mention %s", err.Error(), wantSubstr)
+	}
+}
+
 // TestNoOpsReturnNil verifies that Set, Add, Delete, and Close all return nil.
 func TestNoOpsReturnNil(t *testing.T) {
 	cache := &gmkOAuthCache{
