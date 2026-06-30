@@ -3,9 +3,11 @@ module github.com/flexprice/bento-collector
 go 1.25
 
 require (
+	cloud.google.com/go/compute/metadata v0.6.0
 	github.com/flexprice/go-sdk v1.0.10
 	github.com/joho/godotenv v1.5.1
 	github.com/warpstreamlabs/bento v1.12.1
+	golang.org/x/oauth2 v0.27.0
 )
 
 require (
@@ -16,7 +18,6 @@ require (
 	cloud.google.com/go/auth v0.9.9 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.5 // indirect
 	cloud.google.com/go/bigquery v1.64.0 // indirect
-	cloud.google.com/go/compute/metadata v0.6.0 // indirect
 	cloud.google.com/go/iam v1.2.2 // indirect
 	cloud.google.com/go/longrunning v0.6.2 // indirect
 	cloud.google.com/go/monitoring v1.21.2 // indirect
@@ -379,7 +380,6 @@ require (
 	golang.org/x/exp v0.0.0-20250717185816-542afb5b7346 // indirect
 	golang.org/x/mod v0.26.0 // indirect
 	golang.org/x/net v0.42.0 // indirect
-	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.34.0 // indirect
 	golang.org/x/term v0.33.0 // indirect
