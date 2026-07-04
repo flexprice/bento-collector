@@ -1,0 +1,55 @@
+# Azure Event Hubs (Kafka protocol) -> Flexprice API.
+#
+# Reads event bus from Azure Event Hubs over the Kafka protocol and
+# POSTs each event to the Flexprice ingest API. Transform is intentionally
+# EMPTY (passthrough) — the message is sent to Flexprice as-is. Add mapping
+# processors under `pipeline.processors` later without touching input/output.
+#
+# All connection details are env-driven; 
+
+input:
+  kafka:
+    # Azure EH namespace endpoint, Kafka protocol: <namespace>.servicebus.windows.net:9093
+    addresses:
+      - ${AZURE_EH_BROKER}
+
+    topics:
+      - ${AZURE_EH_TOPIC}
+
+    consumer_group: ${AZURE_EH_CONSUMER_GROUP:flexprice-bento}
+    start_from_oldest: ${AZURE_EH_START_FROM_OLDEST:true}
+
+    tls:
+      enabled: true
+
+    sasl:
+      # Azure EH uses SASL_SSL / PLAIN. user is the literal "$ConnectionString",
+      # password is the full EH connection string (Listen-only SAS).
+      mechanism: PLAIN
+      user: ${AZURE_EH_SASL_USER:$ConnectionString}
+      password: ${AZURE_EH_CONNECTION_STRING}
+
+    client_id: ${AZURE_EH_CLIENT_ID:flexprice-bento}
+
+    commit_period: ${AZURE_EH_COMMIT_PERIOD:5s}
+    max_processing_period: ${AZURE_EH_MAX_PROCESSING_PERIOD:60s}
+    fetch_buffer_cap: ${AZURE_EH_FETCH_BUFFER_CAP:1000}
+    checkpoint_limit: ${AZURE_EH_CHECKPOINT_LIMIT:100}
+
+pipeline:
+  # ---------------------------------------------------------------------------
+  # Transform intentionally EMPTY (passthrough). Event sent to Flexprice exactly
+  # as received from Azure EH. Add `mapping:` processors here when needed.
+  # ---------------------------------------------------------------------------
+  processors: []
+
+output:
+  flexprice:
+    api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+    api_key: ${FLEXPRICE_API_KEY}
+    scheme: ${FLEXPRICE_SCHEME:https}
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true

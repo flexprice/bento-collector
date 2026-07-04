@@ -1,0 +1,54 @@
+# AWS MSK (Kafka) -> Flexprice API.
+#
+# Reads events from an AWS MSK topic and POSTs each event to the Flexprice
+# ingest API. Transform is intentionally EMPTY (passthrough) — the message is
+# sent to Flexprice as-is. Add mapping processors under `pipeline.processors`
+# later without touching input/output.
+#
+# All connection details are env-driven;
+
+input:
+  kafka:
+    # MSK bootstrap brokers (SASL/SCRAM listener, :9096)
+    addresses:
+      - ${AWS_KAFKA_BROKERS}
+
+    topics:
+      - ${AWS_KAFKA_TOPIC}
+
+    consumer_group: ${AWS_KAFKA_CONSUMER_GROUP:flexprice-bento}
+    start_from_oldest: ${AWS_KAFKA_START_FROM_OLDEST:true}
+
+    tls:
+      enabled: ${AWS_KAFKA_TLS_ENABLED:true}
+
+    sasl:
+      # MSK SASL/SCRAM-SHA-512
+      mechanism: ${AWS_KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
+      user: ${AWS_KAFKA_SASL_USER}
+      password: ${AWS_KAFKA_SASL_PASSWORD}
+
+    client_id: ${AWS_KAFKA_CLIENT_ID:flexprice-bento}
+
+    commit_period: ${AWS_KAFKA_COMMIT_PERIOD:5s}
+    max_processing_period: ${AWS_KAFKA_MAX_PROCESSING_PERIOD:60s}
+    fetch_buffer_cap: ${AWS_KAFKA_FETCH_BUFFER_CAP:1000}
+    checkpoint_limit: ${AWS_KAFKA_CHECKPOINT_LIMIT:100}
+
+pipeline:
+  # ---------------------------------------------------------------------------
+  # Transform intentionally EMPTY (passthrough). Event sent to Flexprice exactly
+  # as received from MSK. Add `mapping:` processors here when needed.
+  # ---------------------------------------------------------------------------
+  processors: []
+
+output:
+  flexprice:
+    api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+    api_key: ${FLEXPRICE_API_KEY}
+    scheme: ${FLEXPRICE_SCHEME:https}
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true
