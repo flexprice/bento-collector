@@ -1,0 +1,70 @@
+# Azure Event Hubs (Kafka protocol) -> Flexprice API — Managed Identity auth.
+#
+# Same pipeline as azure-eh-to-flexprice.yaml, but authenticates to Azure
+# Event Hubs with an Azure AD token from a User-Assigned Managed Identity (UAMI)
+# over SASL OAUTHBEARER — NO connection string, NO SAS key.
+#
+# Prereqs (Azure side):
+#   1. Collector runs on Azure compute (AKS pod / Container App / VM) with the
+#      UAMI attached. Managed Identity needs the Azure IMDS endpoint, which only
+#      exists inside Azure — this config will NOT authenticate from AWS/GCP.
+#   2. Grant the UAMI the "Azure Event Hubs Data Receiver" role on the Event
+#      Hubs namespace (or the specific entity/topic).
+#   3. Set AZURE_EH_MANAGED_IDENTITY_CLIENT_ID to the UAMI's client ID.
+#
+# Transform is intentionally EMPTY (passthrough) — the message is sent to
+# Flexprice as-is. Add mapping processors under `pipeline.processors` later.
+
+cache_resources:
+  - label: azure_eh_token
+    azure_eventhub_oauth:
+      # AAD scope for the Event Hubs namespace. Overridable via AZURE_EH_OAUTH_SCOPE.
+      # Must be the namespace host + /.default.
+      scope: ${AZURE_EH_OAUTH_SCOPE:https://${AZURE_EH_NAMESPACE}.servicebus.windows.net/.default}
+
+input:
+  kafka:
+    # Azure EH namespace endpoint, Kafka protocol: <namespace>.servicebus.windows.net:9093
+    addresses:
+      - ${AZURE_EH_BROKER}
+
+    topics:
+      - ${AZURE_EH_TOPIC}
+
+    consumer_group: ${AZURE_EH_CONSUMER_GROUP:flexprice-bento}
+    start_from_oldest: ${AZURE_EH_START_FROM_OLDEST:true}
+
+    tls:
+      enabled: true
+
+    sasl:
+      # Azure EH accepts a raw AAD access token as the OAUTHBEARER bearer.
+      # The azure_eventhub_oauth cache mints it from the UAMI.
+      mechanism: OAUTHBEARER
+      token_cache: azure_eh_token
+      token_key: token
+
+    client_id: ${AZURE_EH_CLIENT_ID:flexprice-bento}
+
+    commit_period: ${AZURE_EH_COMMIT_PERIOD:5s}
+    max_processing_period: ${AZURE_EH_MAX_PROCESSING_PERIOD:60s}
+    fetch_buffer_cap: ${AZURE_EH_FETCH_BUFFER_CAP:1000}
+    checkpoint_limit: ${AZURE_EH_CHECKPOINT_LIMIT:100}
+
+pipeline:
+  # ---------------------------------------------------------------------------
+  # Transform intentionally EMPTY (passthrough). Event sent to Flexprice exactly
+  # as received from Azure EH. Add `mapping:` processors here when needed.
+  # ---------------------------------------------------------------------------
+  processors: []
+
+output:
+  flexprice:
+    api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+    api_key: ${FLEXPRICE_API_KEY}
+    scheme: ${FLEXPRICE_SCHEME:https}
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true

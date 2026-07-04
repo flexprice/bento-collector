@@ -1,0 +1,67 @@
+# ============================================================================
+# Azure Event Hubs OAUTHBEARER Auth Smoke Test
+# ============================================================================
+#
+# Purpose:
+#   Prove that the azure_eventhub_oauth cache plugin can authenticate to Azure
+#   Event Hubs over the Kafka protocol using OAUTHBEARER with a Managed Identity.
+#   This config connects to an Event Hub, consumes any available messages, and
+#   immediately drops them. No data is written anywhere.
+#
+# Why drop output:
+#   Zero pollution guarantee — the drop output discards every message in memory.
+#   A successful connection + poll proves auth works; nothing is written.
+#
+# Required env vars:
+#   AZURE_EH_AUTHTEST_BROKER  — EH namespace, Kafka protocol:
+#                               <namespace>.servicebus.windows.net:9093
+#   AZURE_EH_AUTHTEST_TOPIC   — Event Hub name to consume from
+#   AZURE_EH_NAMESPACE        — namespace short name (builds the AAD scope)
+#   AZURE_EH_MANAGED_IDENTITY_CLIENT_ID — (optional) UAMI client ID; when unset,
+#                               DefaultAzureCredential is used
+#   AZURE_EH_AUTHTEST_GROUP   — (optional) consumer group; default: bento-azure-authtest
+#
+# How to run:
+#   bento -c internal/azure-eh-authtest.yaml
+#
+# Authentication:
+#   Must run on Azure compute (AKS / Container App / VM) with a User-Assigned
+#   Managed Identity granted the "Azure Event Hubs Data Receiver" role on the
+#   namespace or entity. Managed Identity needs the Azure IMDS endpoint, which
+#   only exists inside Azure — this will NOT authenticate from AWS/GCP.
+#
+# IMPORTANT: This config is strictly for auth validation. Point it at a
+# throwaway Event Hub, not production.
+# ============================================================================
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true
+
+cache_resources:
+  - label: azure_eh_token
+    azure_eventhub_oauth:
+      scope: ${AZURE_EH_OAUTH_SCOPE:https://${AZURE_EH_NAMESPACE}.servicebus.windows.net/.default}
+
+input:
+  kafka:
+    addresses:
+      - ${AZURE_EH_AUTHTEST_BROKER}
+
+    topics:
+      - ${AZURE_EH_AUTHTEST_TOPIC}
+
+    consumer_group: ${AZURE_EH_AUTHTEST_GROUP:bento-azure-authtest}
+    start_from_oldest: false
+
+    tls:
+      enabled: true
+
+    sasl:
+      mechanism: OAUTHBEARER
+      token_cache: azure_eh_token
+      token_key: token
+
+output:
+  drop: {}
