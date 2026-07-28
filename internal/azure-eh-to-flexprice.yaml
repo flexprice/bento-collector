@@ -49,6 +49,21 @@ output:
     api_key: ${FLEXPRICE_API_KEY}
     scheme: ${FLEXPRICE_SCHEME:https}
 
+    # Accumulate events before sending. Without this block Bento flushes one
+    # message at a time and the output falls back to the single-event endpoint,
+    # costing one HTTP request per event. With it, batches of 2+ are sent to
+    # POST /v1/events/bulk in a single request.
+    #
+    # count defaults to 200 to match the API's kafka.bulk_max_batch_size, so one
+    # request maps to one Kafka batch and one ClickHouse INSERT downstream. The
+    # bulk endpoint hard-caps at 1000; the output chunks anything larger.
+    # period bounds latency when the topic is slow — whichever trips first wins.
+    batching:
+      count: ${FLEXPRICE_BATCH_SIZE:200}
+      period: ${FLEXPRICE_BATCH_PERIOD:5s}
+
+    max_in_flight: ${FLEXPRICE_MAX_IN_FLIGHT:10}
+
 logger:
   level: ${LOG_LEVEL:INFO}
   format: logfmt
