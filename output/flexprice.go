@@ -11,6 +11,12 @@ import (
 	"github.com/warpstreamlabs/bento/public/service"
 )
 
+// maxBulkBatchSize is the maximum number of events the Flexprice bulk ingest
+// endpoint accepts in a single request. The API validates `events` with
+// `min=1,max=1000` and rejects anything larger with a non-retryable 400, so
+// oversized batches are split into chunks of at most this size before sending.
+const maxBulkBatchSize = 1000
+
 // flexpriceConfig holds the configuration for the Flexprice output plugin
 type flexpriceConfig struct {
 	APIHost string
@@ -193,8 +199,30 @@ func (f *flexpriceOutput) sendSingleEvent(ctx context.Context, event flexprice.D
 	return fmt.Errorf("unexpected status code: %d", httpResp.StatusCode)
 }
 
-// sendBulkEvents sends multiple events using the bulk API
+// sendBulkEvents sends multiple events using the bulk API, splitting the batch
+// into chunks of at most maxBulkBatchSize so a large batching.count can never
+// exceed the API's per-request limit.
 func (f *flexpriceOutput) sendBulkEvents(ctx context.Context, events []flexprice.DtoIngestEventRequest) error {
+	if len(events) <= maxBulkBatchSize {
+		return f.sendBulkChunk(ctx, events)
+	}
+
+	f.logger.Infof("📦 Batch of %d events exceeds bulk limit of %d, splitting into chunks", len(events), maxBulkBatchSize)
+
+	for start := 0; start < len(events); start += maxBulkBatchSize {
+		end := min(start+maxBulkBatchSize, len(events))
+
+		if err := f.sendBulkChunk(ctx, events[start:end]); err != nil {
+			return fmt.Errorf("failed to send chunk [%d:%d] of %d events: %w", start, end, len(events), err)
+		}
+	}
+
+	return nil
+}
+
+// sendBulkChunk sends a single bulk request. The caller guarantees len(events)
+// is within maxBulkBatchSize.
+func (f *flexpriceOutput) sendBulkChunk(ctx context.Context, events []flexprice.DtoIngestEventRequest) error {
 	f.logger.Infof("📦 Sending bulk batch: %d events", len(events))
 
 	// Create bulk request
