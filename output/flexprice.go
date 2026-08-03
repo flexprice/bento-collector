@@ -78,7 +78,6 @@ func init() {
 			if err != nil {
 				return nil, batchPolicy, 0, err
 			}
-
 			if apiKey == "" {
 				return nil, batchPolicy, 0, fmt.Errorf("api_key is required")
 			}
@@ -94,6 +93,11 @@ func init() {
 			output = &flexpriceOutput{
 				client: client,
 				logger: mgr.Logger(),
+				// A configured batching policy is an explicit request to send events
+				// in bulk, so honour it even when a flush ends up holding a single
+				// event. Without a policy, Bento flushes one message at a time and
+				// the single-event endpoint stays the right choice.
+				alwaysBulk: !batchPolicy.IsNoop(),
 			}
 
 			return output, batchPolicy, maxInFlight, nil
@@ -108,6 +112,10 @@ func init() {
 type flexpriceOutput struct {
 	client *flexprice.APIClient
 	logger *service.Logger
+	// alwaysBulk routes single-event flushes through the bulk endpoint too, so
+	// request shape stays uniform on low-volume topics. Set when a batching
+	// policy is configured.
+	alwaysBulk bool
 }
 
 // Connect implements service.BatchOutput
@@ -162,8 +170,12 @@ func (f *flexpriceOutput) WriteBatch(ctx context.Context, batch service.MessageB
 		return fmt.Errorf("no valid events in batch")
 	}
 
-	// Use bulk endpoint if we have multiple events, single endpoint for one event
-	if len(events) == 1 {
+	// Use bulk endpoint if we have multiple events, single endpoint for one event.
+	// When a batching policy is configured, a one-event flush goes to the bulk
+	// endpoint too — the API accepts a single-element batch, and on a low-volume
+	// topic this keeps every request on one endpoint instead of splitting across
+	// both when the batch period expires before the count is reached.
+	if len(events) == 1 && !f.alwaysBulk {
 		return f.sendSingleEvent(ctx, events[0])
 	}
 
