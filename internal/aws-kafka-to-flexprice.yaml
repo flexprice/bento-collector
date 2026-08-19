@@ -48,6 +48,28 @@ output:
     api_key: ${FLEXPRICE_API_KEY}
     scheme: ${FLEXPRICE_SCHEME:https}
 
+    # -------------------------------------------------------------------------
+    # Batching controls WHICH Flexprice endpoint is used. The policy is read
+    # once at startup:
+    #
+    #   * Policy is a no-op  -> a 1-event flush goes to the SINGLE event
+    #                           endpoint; a multi-event flush still goes to bulk.
+    #   * Policy is active   -> EVERY flush goes to the BULK endpoint, including
+    #                           one holding a single event.
+    #
+    # Defaults below are empty/1, which Bento treats as a no-op policy, so out
+    # of the box this config runs in single-event mode. Set FLEXPRICE_BATCH_COUNT
+    # (>1) and/or FLEXPRICE_BATCH_PERIOD to switch the same config to bulk.
+    #
+    # Note: count must be >1 to activate the policy — count=1 on its own is
+    # still a no-op. Batches larger than 1000 are chunked automatically by the
+    # output plugin to respect the bulk API limit.
+    # -------------------------------------------------------------------------
+    batching:
+      count: ${FLEXPRICE_BATCH_COUNT:1}
+      period: ${FLEXPRICE_BATCH_PERIOD:}
+      byte_size: ${FLEXPRICE_BATCH_BYTE_SIZE:0}
+
 logger:
   level: ${LOG_LEVEL:INFO}
   format: logfmt
