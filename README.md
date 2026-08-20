@@ -9,64 +9,116 @@ Built on the official Flexprice Go SDK, this collector handles event transformat
 ## Features
 
 - **Flexprice Output Plugin** — Uses official Flexprice Go SDK for reliable event ingestion
-- **Any Input Source** — Kafka, PostgreSQL, HTTP, S3, and 200+ connectors
+- **Any Input Source** — Kafka, AWS MSK, Azure Event Hubs, PostgreSQL, HTTP, S3, and 200+ connectors
 - **Bloblang Transforms** — Transform and enrich events on-the-fly
 - **Built-in Reliability** — Retry logic, batching, and dead-letter queue support
-- **Docker Ready** — Production-ready container included
+- **Docker Ready** — Multi-arch image published to GHCR
 
 ---
 
-## Quick Start
+## How to use this collector
 
-### 1. Build the Binary
+Everything here follows the same three steps. Pick your path, then jump to the section:
+
+1. **[Get the binary or image](#1-get-the-binary-or-image)** — build from source or pull from GHCR
+2. **[Pick a config for your source](#2-pick-a-config-for-your-source)** — a ready-made YAML per source
+3. **[Set the environment variables](#3-set-the-environment-variables)** — every config is fully env-driven
+
+Configs are never edited to change environment, credentials, or auth mode — only env vars change. The same file works in local dev and production.
+
+---
+
+## 1. Get the binary or image
+
+**Build from source:**
 
 ```bash
 go build -o bento-flexprice main.go
 ```
 
-### 2. Set Environment Variables
-
-Copy the example environment file and configure your Flexprice credentials:
+**Or pull the published image** (multi-arch: `linux/amd64`, `linux/arm64`):
 
 ```bash
-cp env.example .env
+docker pull ghcr.io/flexprice/bento-collector:latest
 ```
 
-Edit `.env` with your Flexprice API credentials (see [env.example](env.example)):
+---
 
-```bash
-# Required for Quick Start
-FLEXPRICE_API_HOST=api.cloud.flexprice.io
-FLEXPRICE_API_KEY=your_api_key_here
-```
+## 2. Pick a config for your source
 
-Then load the environment:
+| Source | Config | Notes |
+|--------|--------|-------|
+| Dummy events (smoke test) | [examples/dummy-events-to-flexprice.yaml](examples/dummy-events-to-flexprice.yaml) | No infrastructure needed — start here |
+| Generic Kafka / Confluent | [examples/kafka/consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Simple consume → Flexprice |
+| Generic Kafka + DLQ | [examples/kafka/consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Recommended for production |
+| **AWS MSK** | [internal/aws-kafka-to-flexprice.yaml](internal/aws-kafka-to-flexprice.yaml) | All MSK listener types — see [MSK auth modes](#aws-msk-auth-modes) |
+| Azure Event Hubs (SAS) | [internal/azure-eh-to-flexprice.yaml](internal/azure-eh-to-flexprice.yaml) | Connection-string auth |
+| Azure Event Hubs (Managed Identity) | [internal/azure-eh-to-flexprice-mi.yaml](internal/azure-eh-to-flexprice-mi.yaml) | No secrets on disk |
 
-```bash
-source .env
-```
-
-### 3. Run an Example
-
-**Example 1: Generate Dummy Events → Flexprice**
-
-The simplest way to test — generates random events and sends them directly to Flexprice:
+Run it:
 
 ```bash
 ./bento-flexprice -c examples/dummy-events-to-flexprice.yaml
 ```
 
-**Example 2: Kafka → Flexprice (with Dead Letter Queue)**
-
-Production-ready example that consumes from Kafka, transforms events, and sends to Flexprice with automatic retries and DLQ for failed events:
+Or with Docker:
 
 ```bash
-# First, generate test events to Kafka
-./bento-flexprice -c examples/kafka/generate-to-kafka.yaml
-
-# Then consume and send to Flexprice (with DLQ support)
-./bento-flexprice -c examples/kafka/consume-from-kafka-with-dlq.yaml
+docker run --rm --env-file .env \
+  -v "$PWD/internal:/configs:ro" \
+  ghcr.io/flexprice/bento-collector:latest -c /configs/aws-kafka-to-flexprice.yaml
 ```
+
+---
+
+## 3. Set the environment variables
+
+```bash
+cp env.example .env
+# edit .env, then:
+source .env
+```
+
+Every config needs these two:
+
+```bash
+FLEXPRICE_API_HOST=api.cloud.flexprice.io
+FLEXPRICE_API_KEY=your_api_key_here
+```
+
+The rest depend on your source — see the [full reference](#environment-variables-reference) and [env.example](env.example).
+
+### AWS MSK auth modes
+
+The MSK config supports every listener type. Two variables select the mode; **the config file never changes**:
+
+| Listener | Port | `AWS_KAFKA_TLS_ENABLED` | `AWS_KAFKA_SASL_MECHANISM` | Credentials |
+|----------|------|--------------------------|-----------------------------|-------------|
+| SASL/SCRAM over TLS *(default)* | 9096 | `true` | `SCRAM-SHA-512` | required |
+| TLS, no auth | 9094 | `true` | `none` | not needed |
+| PLAINTEXT (no TLS, no auth) | 9092 | `false` | `none` | not needed |
+| SASL/PLAIN over TLS | 9096 | `true` | `PLAIN` | required |
+
+```bash
+# Example: PLAINTEXT listener — no credentials required at all
+AWS_KAFKA_BROKERS=b-1.your-cluster.kafka.us-east-1.amazonaws.com:9092
+AWS_KAFKA_TOPIC=your-topic
+AWS_KAFKA_TLS_ENABLED=false
+AWS_KAFKA_SASL_MECHANISM=none
+```
+
+> **Security:** PLAINTEXT sends event payloads unencrypted — only use it for brokers reachable solely from inside your VPC. Never combine `PLAIN` with TLS disabled; that puts the password on the wire. For SCRAM, source the credentials from the AWS Secrets Manager secret bound to the cluster rather than committing them.
+
+### Single vs bulk ingestion
+
+The Flexprice output picks its endpoint from the batching policy, set once at startup:
+
+| Setting | 1-event flush | N-event flush |
+|---------|---------------|---------------|
+| defaults (`FLEXPRICE_BATCH_COUNT=1`, no period) | single-event endpoint | bulk |
+| `FLEXPRICE_BATCH_COUNT=500`, `FLEXPRICE_BATCH_PERIOD=5s` | **bulk** | bulk |
+
+`FLEXPRICE_BATCH_COUNT=1` does *not* enable batching — activation needs a count above 1, or a non-empty period. Batches larger than 1000 events are split automatically to respect the bulk API limit.
 
 ---
 
@@ -100,6 +152,8 @@ Events must be JSON with these fields (see [Flexprice Ingest Event API](https://
 | [generate-to-kafka.yaml](examples/kafka/generate-to-kafka.yaml) | Generate events → Kafka | `./bento-flexprice -c examples/kafka/generate-to-kafka.yaml` |
 | [consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Kafka → Flexprice (simple) | `./bento-flexprice -c examples/kafka/consume-from-kafka.yaml` |
 | [consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Kafka → Flexprice (with DLQ) | `./bento-flexprice -c examples/kafka/consume-from-kafka-with-dlq.yaml` |
+
+Additional deployment-specific configs (AWS MSK, Azure Event Hubs, ClickHouse, S3) live in [internal/](internal/).
 
 ### Kafka Testing Flow
 
@@ -179,6 +233,12 @@ ERROR[...] Failed to send event: 400 Bad Request
 - Check SASL credentials are correct
 - Ensure TLS is enabled in config
 
+**AWS MSK:**
+- The port must match the auth mode — `:9096` SASL, `:9094` TLS-only, `:9092` PLAINTEXT. A mismatch between port and [auth mode](#aws-msk-auth-modes) is the most common failure.
+- Broker hangs with no error: the security group usually isn't allowing the collector's traffic on that port.
+- `SASL` / `SCRAM` errors while intending plaintext: `AWS_KAFKA_SASL_MECHANISM` isn't set to `none`.
+- Enable the cluster's listener before pointing at it — MSK does not expose all four listeners by default.
+
 **Local Kafka:**
 - Use `localhost:29092` (from host) or `kafka:9092` (from Docker)
 - Check topic exists: `kafka-topics --list --bootstrap-server localhost:29092`
@@ -206,6 +266,10 @@ bento-collector/
 │       ├── generate-to-kafka.yaml       # Generate → Kafka
 │       ├── consume-from-kafka.yaml      # Kafka → Flexprice
 │       └── consume-from-kafka-with-dlq.yaml  # Kafka → Flexprice (with DLQ)
+├── internal/                            # Deployment-specific configs
+│   ├── aws-kafka-to-flexprice.yaml      # AWS MSK → Flexprice (all auth modes)
+│   ├── azure-eh-to-flexprice.yaml       # Azure Event Hubs (SAS) → Flexprice
+│   └── azure-eh-to-flexprice-mi.yaml    # Azure Event Hubs (Managed Identity)
 ├── Dockerfile                           # Production container
 ├── env.example                          # Environment template
 └── README.md
@@ -244,10 +308,19 @@ bento-collector/
 
 ## Environment Variables Reference
 
+**Flexprice API (required by every config):**
+
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `FLEXPRICE_API_HOST` | Flexprice API host | `api.cloud.flexprice.io` |
 | `FLEXPRICE_API_KEY` | API key | `fp_xxx` |
+| `FLEXPRICE_BATCH_COUNT` | Events per bulk request (>1 enables bulk) | `500` |
+| `FLEXPRICE_BATCH_PERIOD` | Max wait before flushing a batch | `5s` |
+
+**Generic Kafka / Confluent Cloud:**
+
+| Variable | Description | Example |
+|----------|-------------|---------|
 | `FLEXPRICE_KAFKA_BROKERS` | Kafka brokers | `pkc-xxx.confluent.cloud:9092` |
 | `FLEXPRICE_KAFKA_TOPIC` | Kafka topic | `events` |
 | `FLEXPRICE_KAFKA_SASL_USER` | SASL username | From Confluent Cloud |
@@ -255,7 +328,19 @@ bento-collector/
 | `FLEXPRICE_KAFKA_CONSUMER_GROUP` | Consumer group | `bento-flexprice-v1` |
 | `FLEXPRICE_KAFKA_DLQ_TOPIC` | Dead letter queue topic | `events-dlq` |
 
-See [env.example](env.example) for the complete list.
+**AWS MSK** (see [auth modes](#aws-msk-auth-modes)):
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `AWS_KAFKA_BROKERS` | MSK bootstrap brokers | `b-1.xxx.kafka.us-east-1.amazonaws.com:9096` |
+| `AWS_KAFKA_TOPIC` | Topic to consume | `usage-events` |
+| `AWS_KAFKA_CONSUMER_GROUP` | Consumer group | `flexprice-bento` |
+| `AWS_KAFKA_TLS_ENABLED` | TLS on/off — `false` only for PLAINTEXT | `true` |
+| `AWS_KAFKA_SASL_MECHANISM` | `SCRAM-SHA-512` \| `none` \| `PLAIN` \| `AWS_MSK_IAM` | `SCRAM-SHA-512` |
+| `AWS_KAFKA_SASL_USER` | SASL username — omit when mechanism is `none` | From Secrets Manager |
+| `AWS_KAFKA_SASL_PASSWORD` | SASL password — omit when mechanism is `none` | From Secrets Manager |
+
+See [env.example](env.example) for the complete list, including Azure Event Hubs and consumer tuning.
 
 ---
 
