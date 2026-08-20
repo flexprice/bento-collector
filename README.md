@@ -330,7 +330,7 @@ Two workflows, in [.github/workflows/](.github/workflows/):
 
 | Workflow | Runs on | Does |
 |----------|---------|------|
-| [ci.yml](.github/workflows/ci.yml) | PRs to `main`, pushes to `main` | Tests (`-race`), gofmt + `go vet` + golangci-lint, `bento lint` on **every** config in `examples/` and `internal/`, and a no-push Docker build |
+| [ci.yml](.github/workflows/ci.yml) | PRs to `main`, pushes to `main` | Tests (`-race`), gofmt + `go vet`, `bento lint` on **every** config in `examples/` and `internal/`, and a no-push Docker build |
 | [publish-image.yml](.github/workflows/publish-image.yml) | Version tags (`v*`) only | Runs tests, then builds and pushes the multi-arch image to GHCR with SBOM, provenance attestation, and a Trivy scan that fails on HIGH/CRITICAL |
 
 Merging to `main` never publishes an image — only tagging does.
