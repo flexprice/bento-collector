@@ -5,11 +5,27 @@
 # sent to Flexprice as-is. Add mapping processors under `pipeline.processors`
 # later without touching input/output.
 #
-# All connection details are env-driven;
+# All connection details are env-driven; this one file covers every MSK
+# listener type by setting two variables — no config edit needed.
+#
+#   Listener                     Port   AWS_KAFKA_TLS_ENABLED  AWS_KAFKA_SASL_MECHANISM
+#   ---------------------------  -----  ---------------------  ------------------------
+#   SASL/SCRAM over TLS          9096   true                   SCRAM-SHA-512  (default)
+#   TLS, no auth                 9094   true                   none
+#   PLAINTEXT (no TLS, no auth)  9092   false                  none
+#   SASL/PLAIN over TLS          9096   true                   PLAIN
+#
+# Notes:
+#   * `none` disables SASL entirely; user/password are ignored and may be unset.
+#   * PLAINTEXT sends everything unencrypted, including event payloads. Only use
+#     it for a broker reachable solely from inside the VPC.
+#   * MSK does not offer a SASL/PLAIN listener — `PLAIN` is here for
+#     Confluent-style or self-managed brokers reusing this config. It sends the
+#     password essentially in the clear, so never pair it with TLS disabled.
 
 input:
   kafka:
-    # MSK bootstrap brokers (SASL/SCRAM listener, :9096)
+    # MSK bootstrap brokers. Port depends on the listener — see table above.
     addresses:
       - ${AWS_KAFKA_BROKERS}
 
@@ -20,13 +36,16 @@ input:
     start_from_oldest: ${AWS_KAFKA_START_FROM_OLDEST:true}
 
     tls:
+      # Set false ONLY for the PLAINTEXT listener (:9092).
       enabled: ${AWS_KAFKA_TLS_ENABLED:true}
 
     sasl:
-      # MSK SASL/SCRAM-SHA-512
+      # SCRAM-SHA-512 (MSK default) | none | PLAIN | AWS_MSK_IAM
       mechanism: ${AWS_KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
-      user: ${AWS_KAFKA_SASL_USER}
-      password: ${AWS_KAFKA_SASL_PASSWORD}
+      # Unused when mechanism is `none`; empty defaults keep them optional so
+      # the unauthenticated listeners need no credential vars at all.
+      user: ${AWS_KAFKA_SASL_USER:}
+      password: ${AWS_KAFKA_SASL_PASSWORD:}
 
     client_id: ${AWS_KAFKA_CLIENT_ID:flexprice-bento}
 
