@@ -66,10 +66,12 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # v2 line required: golangci-lint v1.x is built with Go 1.24 and refuses
+      # to load a module targeting go 1.25.0. v2 needs action@v7.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.64.8
+          version: v2.13.0
           args: --timeout=5m
 
   validate-configs:

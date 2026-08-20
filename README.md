@@ -1,5 +1,10 @@
 # Bento Flexprice Collector
 
+[![CI](https://github.com/flexprice/bento-collector/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flexprice/bento-collector/actions/workflows/ci.yml)
+[![Publish Image](https://github.com/flexprice/bento-collector/actions/workflows/publish-image.yml/badge.svg)](https://github.com/flexprice/bento-collector/actions/workflows/publish-image.yml)
+[![GHCR](https://ghcr-badge.egpl.dev/flexprice/bento-collector/latest_tag?trim=major&label=ghcr.io)](https://github.com/flexprice/bento-collector/pkgs/container/bento-collector)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A custom [Bento](https://github.com/warpstreamlabs/bento) distribution that enables streaming usage events to [Flexprice](https://flexprice.io) from **any data source** — Kafka, databases, HTTP APIs, files, and [200+ more connectors](https://warpstreamlabs.github.io/bento/docs/components/inputs/about).
 
 Built on the official Flexprice Go SDK, this collector handles event transformation, batching, retries, and dead-letter queues out of the box.
@@ -41,7 +46,12 @@ go build -o bento-flexprice main.go
 
 ```bash
 docker pull ghcr.io/flexprice/bento-collector:latest
+
+# or pin a release (recommended for production)
+docker pull ghcr.io/flexprice/bento-collector:v1.2.2
 ```
+
+The badge at the top of this README always shows the newest published tag. All tags are listed on the [package page](https://github.com/flexprice/bento-collector/pkgs/container/bento-collector).
 
 ---
 
