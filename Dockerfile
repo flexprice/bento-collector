@@ -1,6 +1,18 @@
+# syntax=docker/dockerfile:1.4
 # Multi-stage build for Bento Flexprice
-# Stage 1: Build the Go binary
-FROM golang:1.26-alpine AS builder
+#
+# Stage 1: Build the Go binary.
+#
+# The builder is pinned to BUILDPLATFORM (the native arch of the machine doing
+# the build) and cross-compiles to TARGETARCH. Without this, buildx runs the
+# whole non-native build under QEMU emulation — and because main.go imports
+# bento/public/components/all (~3000 packages), an emulated arm64 build took
+# 40+ minutes in CI. Go cross-compiles natively, so this costs nothing.
+FROM --platform=${BUILDPLATFORM} golang:1.26-alpine AS builder
+
+# Provided automatically by buildx
+ARG TARGETOS
+ARG TARGETARCH
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates
@@ -12,13 +24,21 @@ WORKDIR /build
 COPY go.mod go.sum ./
 
 # Download dependencies
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o bento-flexprice main.go
+# Build the binary.
+#
+# `-a` (force-rebuild everything, including the stdlib) was removed: it defeats
+# the build cache on every run for no benefit here. The cache mounts below let
+# repeat builds reuse compiled packages.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -trimpath -o bento-flexprice main.go
 
 # Stage 2: Create minimal runtime image
 FROM alpine:latest
