@@ -110,7 +110,7 @@ input:
           "modelName": root.methodName.or(""),
           "promptTokens": random_int(min: 500, max: 5000),
           "completionTokens": random_int(min: 200, max: 3000),
-          "isPostCall": random_bool()
+          "isPostCall": random_int(min: 0, max: 1) == 1
         }
         
         # Add Anthropic-specific fields
