@@ -63,16 +63,20 @@ jobs:
             exit 1
           fi
 
+      # golangci-lint is deliberately NOT run here.
+      #
+      # main.go imports bento/public/components/all, which pulls in every Bento
+      # connector — ~3000 packages must be type-checked to lint ~1000 lines of
+      # our own code. golangci-lint ran for 14+ minutes without finishing (and
+      # reproduces the same way locally), while a full `go build ./...` takes
+      # ~70s. The cost is in its own analysis passes, not compilation.
+      #
+      # gofmt and `go vet` below cover the high-value checks cheaply. If we want
+      # deeper linting later, the fix is to trim `components/all` down to the
+      # connectors we actually use — that shrinks lint time, image size and CVE
+      # surface together.
       - name: go vet
         run: go vet ./...
-
-      # v2 line required: golangci-lint v1.x is built with Go 1.24 and refuses
-      # to load a module targeting go 1.25.0. v2 needs action@v7.
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.13.0
-          args: --timeout=5m
 
   validate-configs:
     name: Validate Bento configs
