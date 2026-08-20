@@ -1,0 +1,7 @@
+# Code owners for bento-collector.
+#
+# Listed owners are requested for review automatically on every PR.
+# The team must have write access to the repo, otherwise GitHub silently
+# ignores the entry. @flexprice/flexprice-oss-maintainers has `maintain`.
+
+*   @flexprice/flexprice-oss-maintainers

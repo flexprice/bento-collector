@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.25.12'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Verify go.mod is tidy
+        run: |
+          set -euo pipefail
+          go mod tidy
+          if ! git diff --quiet -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy — run 'go mod tidy' and commit the result"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # v2 line required: golangci-lint v1.x is built with Go 1.24 and refuses
+      # to load a module targeting go 1.25.0. v2 needs action@v7.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.13.0
+          args: --timeout=5m
+
+  validate-configs:
+    name: Validate Bento configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build collector
+        run: go build -o bento-flexprice main.go
+
+      # Lints every shipped config so a broken YAML or an unknown field is
+      # caught here rather than at deploy time. Placeholder env vars satisfy
+      # the required interpolations; they are never used to connect anywhere.
+      - name: Lint configs
+        env:
+          FLEXPRICE_API_HOST: api.cloud.flexprice.io
+          FLEXPRICE_API_KEY: placeholder
+          FLEXPRICE_KAFKA_BROKERS: localhost:9092
+          FLEXPRICE_KAFKA_SASL_USER: placeholder
+          FLEXPRICE_KAFKA_SASL_PASSWORD: placeholder
+          FLEXPRICE_OUTPUT_KAFKA_BROKERS: localhost:9092
+          FLEXPRICE_OUTPUT_KAFKA_SASL_USER: placeholder
+          FLEXPRICE_OUTPUT_KAFKA_SASL_PASSWORD: placeholder
+          FLEXPRICE_CLICKHOUSE_DSN: clickhouse://localhost:9000/default
+          FLEXPRICE_S3_BUCKET_NAME: placeholder
+          FLEXPRICE_S3_KEY_PREFIX: events/
+          AWS_KAFKA_BROKERS: localhost:9096
+          AWS_KAFKA_TOPIC: events
+          AZURE_EH_BROKER: localhost:9093
+          AZURE_EH_NAMESPACE: placeholder
+          AZURE_EH_TOPIC: events
+          AZURE_EH_CONNECTION_STRING: placeholder
+          AZURE_EH_AUTHTEST_BROKER: localhost:9093
+          AZURE_EH_AUTHTEST_TOPIC: events
+          GMK_AUTHTEST_BROKERS: localhost:9092
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r cfg; do
+            if ./bento-flexprice lint "$cfg" 2>&1; then
+              echo "ok   $cfg"
+            else
+              echo "::error file=$cfg::bento lint failed"
+              failed=1
+            fi
+          done < <(find examples internal -name '*.yaml' | sort)
+          exit "$failed"
+
+  # Proves the image still builds on PRs, without pushing anything.
+  # Publishing happens only on a version tag — see publish-image.yml.
+  docker-build:
+    name: Docker build (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

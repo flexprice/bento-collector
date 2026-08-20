@@ -1,5 +1,10 @@
 # Bento Flexprice Collector
 
+[![CI](https://github.com/flexprice/bento-collector/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/flexprice/bento-collector/actions/workflows/ci.yml)
+[![Publish Image](https://github.com/flexprice/bento-collector/actions/workflows/publish-image.yml/badge.svg)](https://github.com/flexprice/bento-collector/actions/workflows/publish-image.yml)
+[![GHCR](https://ghcr-badge.egpl.dev/flexprice/bento-collector/latest_tag?trim=major&label=ghcr.io)](https://github.com/flexprice/bento-collector/pkgs/container/bento-collector)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A custom [Bento](https://github.com/warpstreamlabs/bento) distribution that enables streaming usage events to [Flexprice](https://flexprice.io) from **any data source** — Kafka, databases, HTTP APIs, files, and [200+ more connectors](https://warpstreamlabs.github.io/bento/docs/components/inputs/about).
 
 Built on the official Flexprice Go SDK, this collector handles event transformation, batching, retries, and dead-letter queues out of the box.
@@ -8,11 +13,12 @@ Built on the official Flexprice Go SDK, this collector handles event transformat
 
 ## Features
 
-- **Flexprice Output Plugin** — Uses official Flexprice Go SDK for reliable event ingestion
-- **Any Input Source** — Kafka, AWS MSK, Azure Event Hubs, PostgreSQL, HTTP, S3, and 200+ connectors
+- **Flexprice Output Plugin** — Uses official Flexprice Go SDK, with automatic single/bulk endpoint selection
+- **Any Input Source** — Kafka, AWS MSK, Azure Event Hubs, Google Managed Kafka, PostgreSQL, HTTP, S3, and 200+ connectors
+- **Cloud OAuth Plugins** — Custom cache plugins for Azure Managed Identity (`azure_eventhub_oauth`) and Google Managed Kafka (`gcp_managed_kafka_oauth`), so no static broker secrets are needed
 - **Bloblang Transforms** — Transform and enrich events on-the-fly
 - **Built-in Reliability** — Retry logic, batching, and dead-letter queue support
-- **Docker Ready** — Multi-arch image published to GHCR
+- **Docker Ready** — Multi-arch image (`linux/amd64`, `linux/arm64`) published to GHCR
 
 ---
 
@@ -40,20 +46,63 @@ go build -o bento-flexprice main.go
 
 ```bash
 docker pull ghcr.io/flexprice/bento-collector:latest
+
+# or pin a release (recommended for production)
+docker pull ghcr.io/flexprice/bento-collector:v1.2.2
 ```
+
+The badge at the top of this README always shows the newest published tag. All tags are listed on the [package page](https://github.com/flexprice/bento-collector/pkgs/container/bento-collector).
 
 ---
 
 ## 2. Pick a config for your source
 
-| Source | Config | Notes |
-|--------|--------|-------|
-| Dummy events (smoke test) | [examples/dummy-events-to-flexprice.yaml](examples/dummy-events-to-flexprice.yaml) | No infrastructure needed — start here |
-| Generic Kafka / Confluent | [examples/kafka/consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Simple consume → Flexprice |
-| Generic Kafka + DLQ | [examples/kafka/consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Recommended for production |
-| **AWS MSK** | [internal/aws-kafka-to-flexprice.yaml](internal/aws-kafka-to-flexprice.yaml) | All MSK listener types — see [MSK auth modes](#aws-msk-auth-modes) |
-| Azure Event Hubs (SAS) | [internal/azure-eh-to-flexprice.yaml](internal/azure-eh-to-flexprice.yaml) | Connection-string auth |
-| Azure Event Hubs (Managed Identity) | [internal/azure-eh-to-flexprice-mi.yaml](internal/azure-eh-to-flexprice-mi.yaml) | No secrets on disk |
+### Start here — [examples/](examples/)
+
+Generic, runnable configs meant as starting points.
+
+| Config | Flow | Notes |
+|--------|------|-------|
+| [dummy-events-to-flexprice.yaml](examples/dummy-events-to-flexprice.yaml) | generate → Flexprice | No infrastructure needed — start here |
+| [generate-to-kafka.yaml](examples/kafka/generate-to-kafka.yaml) | generate → Kafka | Produces test events for the two below |
+| [consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Kafka → Flexprice | Simple consume |
+| [consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Kafka → Flexprice + DLQ | Recommended for production |
+
+### Cloud-managed Kafka — [internal/](internal/)
+
+Production configs we run ourselves. Useful directly, or as references when self-hosting.
+
+| Config | Flow | Auth |
+|--------|------|------|
+| [aws-kafka-to-flexprice.yaml](internal/aws-kafka-to-flexprice.yaml) | AWS MSK → Flexprice | All listener types — see [MSK auth modes](#aws-msk-auth-modes) |
+| [azure-eh-to-flexprice.yaml](internal/azure-eh-to-flexprice.yaml) | Azure Event Hubs → Flexprice | SAS connection string |
+| [azure-eh-to-flexprice-mi.yaml](internal/azure-eh-to-flexprice-mi.yaml) | Azure Event Hubs → Flexprice | Managed Identity (no stored secret) |
+
+### Internal pipelines — [internal/](internal/)
+
+Flexprice-specific pipelines. Listed so the repo is self-describing; most users will not need them.
+
+| Config | Flow | Purpose |
+|--------|------|---------|
+| [custom-kafka-to-flexprice.yaml](internal/custom-kafka-to-flexprice.yaml) | Kafka → Flexprice | BillingEntry event pipeline |
+| [custom-kafka-to-flexprice-kafka.yaml](internal/custom-kafka-to-flexprice-kafka.yaml) | Kafka → Kafka | Republish with retry |
+| [custom-kafka-to-flexprice-kafka-backfill-no-model.yaml](internal/custom-kafka-to-flexprice-kafka-backfill-no-model.yaml) | Kafka → Kafka | Backfill for events with no `modelName` |
+| [custom-kafka-to-flexprice-clickhouse.yaml](internal/custom-kafka-to-flexprice-clickhouse.yaml) | Kafka → ClickHouse + Kafka | Raw events with retry + DLQ |
+| [custom-kafka-to-flexprice-clickhouse-v2.yaml](internal/custom-kafka-to-flexprice-clickhouse-v2.yaml) | Kafka → ClickHouse | v2: single output, org filtering |
+| [custom-kafka-to-flexprice-clickhouse-gmk.yaml](internal/custom-kafka-to-flexprice-clickhouse-gmk.yaml) | Kafka → ClickHouse + Kafka | GMK variant (Google Managed Kafka OAuth) |
+| [custom-events-to-kafka.yaml](internal/custom-events-to-kafka.yaml) | generate → Kafka | Generates BillingEntry test events |
+| [kafka-to-s3.yaml](internal/kafka-to-s3.yaml) | Kafka → S3 | Archive raw events |
+| [custom-kafka-to-s3.yaml](internal/custom-kafka-to-s3.yaml) | Kafka → S3 | Archive BillingEntry events |
+
+### Diagnostics
+
+Smoke tests that connect, log, and drop — they never write to Flexprice.
+
+| Config | Checks |
+|--------|--------|
+| [azure-eh-authtest.yaml](internal/azure-eh-authtest.yaml) | Azure Event Hubs OAUTHBEARER auth works |
+| [gmk-authtest.yaml](internal/gmk-authtest.yaml) | Google Managed Kafka OAUTHBEARER auth works |
+| [verify-flexprice-output.yaml](internal/verify-flexprice-output.yaml) | Inspect what a topic actually contains |
 
 Run it:
 
@@ -144,18 +193,9 @@ Events must be JSON with these fields (see [Flexprice Ingest Event API](https://
 
 ---
 
-## Examples
+## Kafka Testing Flow
 
-| Example | Description | Command |
-|---------|-------------|---------|
-| [dummy-events-to-flexprice.yaml](examples/dummy-events-to-flexprice.yaml) | Generate dummy events → Flexprice | `./bento-flexprice -c examples/dummy-events-to-flexprice.yaml` |
-| [generate-to-kafka.yaml](examples/kafka/generate-to-kafka.yaml) | Generate events → Kafka | `./bento-flexprice -c examples/kafka/generate-to-kafka.yaml` |
-| [consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Kafka → Flexprice (simple) | `./bento-flexprice -c examples/kafka/consume-from-kafka.yaml` |
-| [consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Kafka → Flexprice (with DLQ) | `./bento-flexprice -c examples/kafka/consume-from-kafka-with-dlq.yaml` |
-
-Additional deployment-specific configs (AWS MSK, Azure Event Hubs, ClickHouse, S3) live in [internal/](internal/).
-
-### Kafka Testing Flow
+The full list of configs is in [Pick a config for your source](#2-pick-a-config-for-your-source). To exercise a Kafka round-trip locally:
 
 ```bash
 # Step 1: Generate test events to Kafka
@@ -257,23 +297,54 @@ go build -o bento-flexprice main.go
 
 ```
 bento-collector/
-├── main.go                              # Entry point
+├── main.go                              # Entry point — registers plugins, runs Bento CLI
 ├── output/
-│   └── flexprice.go                     # Custom Flexprice output plugin
-├── examples/
-│   ├── dummy-events-to-flexprice.yaml   # Direct: Generate → Flexprice
+│   ├── flexprice.go                     # Flexprice output plugin (single + bulk)
+│   ├── azure_eh_oauth_cache.go          # `azure_eventhub_oauth` cache plugin
+│   └── gmk_oauth_cache.go               # `gcp_managed_kafka_oauth` cache plugin
+├── examples/                            # Generic starting-point configs
+│   ├── dummy-events-to-flexprice.yaml   # Generate → Flexprice
 │   └── kafka/
 │       ├── generate-to-kafka.yaml       # Generate → Kafka
 │       ├── consume-from-kafka.yaml      # Kafka → Flexprice
 │       └── consume-from-kafka-with-dlq.yaml  # Kafka → Flexprice (with DLQ)
-├── internal/                            # Deployment-specific configs
+├── internal/                            # Configs we run internally (see internal/README.md)
 │   ├── aws-kafka-to-flexprice.yaml      # AWS MSK → Flexprice (all auth modes)
-│   ├── azure-eh-to-flexprice.yaml       # Azure Event Hubs (SAS) → Flexprice
-│   └── azure-eh-to-flexprice-mi.yaml    # Azure Event Hubs (Managed Identity)
+│   ├── azure-eh-to-flexprice*.yaml      # Azure Event Hubs (SAS + Managed Identity)
+│   ├── custom-kafka-to-*.yaml           # BillingEntry pipelines (Flexprice/ClickHouse/S3)
+│   └── *-authtest.yaml                  # Auth smoke tests (connect, log, drop)
+├── scripts/
+│   └── build_and_push_ecr.sh            # Build + push to AWS ECR
 ├── Dockerfile                           # Production container
+├── Dockerfile.ecs                       # ECS variant
+├── DEPLOYMENT.md                        # ECR / ECS deployment guide
 ├── env.example                          # Environment template
 └── README.md
 ```
+
+---
+
+## CI & Releases
+
+Two workflows, in [.github/workflows/](.github/workflows/):
+
+| Workflow | Runs on | Does |
+|----------|---------|------|
+| [ci.yml](.github/workflows/ci.yml) | PRs to `main`, pushes to `main` | Tests (`-race`), gofmt + `go vet` + golangci-lint, `bento lint` on **every** config in `examples/` and `internal/`, and a no-push Docker build |
+| [publish-image.yml](.github/workflows/publish-image.yml) | Version tags (`v*`) only | Runs tests, then builds and pushes the multi-arch image to GHCR with SBOM, provenance attestation, and a Trivy scan that fails on HIGH/CRITICAL |
+
+Merging to `main` never publishes an image — only tagging does.
+
+### Cutting a release
+
+```bash
+git tag -a v1.2.3 -m "v1.2.3"
+git push origin v1.2.3
+```
+
+That publishes `ghcr.io/flexprice/bento-collector:v1.2.3`. Only a final release (no pre-release suffix) also moves `:latest`, so `v1.2.3-rc.1` publishes without disturbing it.
+
+**Required repo settings:** `secrets.GHCR_PUBLISH_TOKEN` (a PAT with `write:packages`; falls back to `GITHUB_TOKEN` if the package is linked to this repo with Write) and optionally `vars.GHCR_USERNAME` when the PAT owner differs from the tagging user.
 
 ---
 
