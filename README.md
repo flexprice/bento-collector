@@ -14,7 +14,7 @@ Built on the official Flexprice Go SDK, this collector handles event transformat
 ## Features
 
 - **Flexprice Output Plugin** — Uses official Flexprice Go SDK, with automatic single/bulk endpoint selection
-- **Any Input Source** — Kafka, AWS MSK, Azure Event Hubs, Google Managed Kafka, PostgreSQL, HTTP, S3, and 200+ connectors
+- **Any Input Source** — Kafka, AWS MSK, AWS SQS, Azure Event Hubs, Google Managed Kafka, PostgreSQL, HTTP, S3, and 200+ connectors
 - **Cloud OAuth Plugins** — Custom cache plugins for Azure Managed Identity (`azure_eventhub_oauth`) and Google Managed Kafka (`gcp_managed_kafka_oauth`), so no static broker secrets are needed
 - **Bloblang Transforms** — Transform and enrich events on-the-fly
 - **Built-in Reliability** — Retry logic, batching, and dead-letter queue support
@@ -68,13 +68,14 @@ Generic, runnable configs meant as starting points.
 | [consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Kafka → Flexprice | Simple consume |
 | [consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Kafka → Flexprice + DLQ | Recommended for production |
 
-### Cloud-managed Kafka — [internal/](internal/)
+### Cloud-managed sources — [internal/](internal/)
 
 Production configs we run ourselves. Useful directly, or as references when self-hosting.
 
 | Config | Flow | Auth |
 |--------|------|------|
 | [aws-kafka-to-flexprice.yaml](internal/aws-kafka-to-flexprice.yaml) | AWS MSK → Flexprice | All listener types — see [MSK auth modes](#aws-msk-auth-modes) |
+| [aws-sqs-to-flexprice.yaml](internal/aws-sqs-to-flexprice.yaml) | AWS SQS → Flexprice | IAM role (EC2/ECS/EKS) or static keys |
 | [azure-eh-to-flexprice.yaml](internal/azure-eh-to-flexprice.yaml) | Azure Event Hubs → Flexprice | SAS connection string |
 | [azure-eh-to-flexprice-mi.yaml](internal/azure-eh-to-flexprice-mi.yaml) | Azure Event Hubs → Flexprice | Managed Identity (no stored secret) |
 
@@ -310,6 +311,7 @@ bento-collector/
 │       └── consume-from-kafka-with-dlq.yaml  # Kafka → Flexprice (with DLQ)
 ├── internal/                            # Configs we run internally (see internal/README.md)
 │   ├── aws-kafka-to-flexprice.yaml      # AWS MSK → Flexprice (all auth modes)
+│   ├── aws-sqs-to-flexprice.yaml        # AWS SQS → Flexprice (IAM role or keys)
 │   ├── azure-eh-to-flexprice*.yaml      # Azure Event Hubs (SAS + Managed Identity)
 │   ├── custom-kafka-to-*.yaml           # BillingEntry pipelines (Flexprice/ClickHouse/S3)
 │   └── *-authtest.yaml                  # Auth smoke tests (connect, log, drop)
