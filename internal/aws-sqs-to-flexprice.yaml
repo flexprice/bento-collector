@@ -6,7 +6,10 @@
 # environment variables change. See env.example (AWS SQS section) for every var.
 #
 # Credentials are resolved by the AWS SDK default chain UNLESS overridden below:
-#   - IAM role on the compute (EC2/ECS/EKS): set AWS_SQS_FROM_EC2_ROLE=true.
+#   - ECS task role / EKS IRSA or Pod Identity: leave everything unset — the
+#     default chain resolves these. Do NOT set AWS_SQS_FROM_EC2_ROLE.
+#   - EC2 instance profile only: set AWS_SQS_FROM_EC2_ROLE=true (this replaces
+#     the default chain with the EC2 instance-profile provider).
 #   - Static keys (running outside AWS): set AWS_SQS_ACCESS_KEY_ID / _SECRET.
 #   - Shared profile / ambient env creds: leave the credentials fields unset.
 # The queue policy must allow sqs:ReceiveMessage, sqs:DeleteMessage and
@@ -32,7 +35,8 @@ input:
     max_number_of_messages: ${AWS_SQS_MAX_MESSAGES:10}
 
     credentials:
-      # IAM role attached to the compute instance (EC2/ECS/EKS). Preferred in AWS.
+      # EC2 instance profile ONLY. For ECS task roles / EKS IRSA leave false and
+      # let the default chain resolve them. Setting true forces the EC2 provider.
       from_ec2_role: ${AWS_SQS_FROM_EC2_ROLE:false}
       # Static keys — only when running outside AWS. Leave unset with from_ec2_role.
       id: ${AWS_SQS_ACCESS_KEY_ID:}
@@ -78,7 +82,7 @@ pipeline:
         message: |
           [SQS→FLEXPRICE] Processing event:
           - Event Name: ${!json("event_name")}
-          - Customer ID: ${!json("external_customer_id")}
+          - Event ID: ${!json("event_id")}
           - Timestamp: ${!json("timestamp")}
 
 output:
