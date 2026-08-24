@@ -50,6 +50,7 @@ pipeline:
 
     # Transform the SQS message body (assumed JSON) to a Flexprice event.
     # Adjust the field mappings below to match your queue's payload shape.
+    # Unit-tested in output/sqs_mapping_test.go, which parses this exact block.
     - mapping: |
         # Required fields
         root.event_name = this.event_name
