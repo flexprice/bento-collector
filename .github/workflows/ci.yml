@@ -111,6 +111,7 @@ jobs:
           FLEXPRICE_S3_KEY_PREFIX: events/
           AWS_KAFKA_BROKERS: localhost:9096
           AWS_KAFKA_TOPIC: events
+          AWS_SQS_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/123456789012/events
           AZURE_EH_BROKER: localhost:9093
           AZURE_EH_NAMESPACE: placeholder
           AZURE_EH_TOPIC: events

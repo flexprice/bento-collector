@@ -1,0 +1,107 @@
+# =============================================================================
+# AWS SQS -> Flexprice
+# =============================================================================
+# Consumes usage events from an AWS SQS queue and sends them to Flexprice.
+# Fully env-driven: the same file works in local dev and production — only the
+# environment variables change. See env.example (AWS SQS section) for every var.
+#
+# Credentials are resolved by the AWS SDK default chain UNLESS overridden below:
+#   - ECS task role / EKS IRSA or Pod Identity: leave everything unset — the
+#     default chain resolves these. Do NOT set AWS_SQS_FROM_EC2_ROLE.
+#   - EC2 instance profile only: set AWS_SQS_FROM_EC2_ROLE=true (this replaces
+#     the default chain with the EC2 instance-profile provider).
+#   - Static keys (running outside AWS): set AWS_SQS_ACCESS_KEY_ID / _SECRET.
+#   - Shared profile / ambient env creds: leave the credentials fields unset.
+# The queue policy must allow sqs:ReceiveMessage, sqs:DeleteMessage and
+# sqs:GetQueueAttributes for whichever identity is used.
+
+input:
+  aws_sqs:
+    # Full queue URL: https://sqs.<region>.amazonaws.com/<account-id>/<queue-name>
+    url: ${AWS_SQS_QUEUE_URL}
+
+    # Region. Optional — the SDK infers it from the URL/environment when unset.
+    region: ${AWS_SQS_REGION:}
+
+    # Delete each message once the Flexprice output acks it. Keep true, else
+    # messages return after the visibility timeout and are delivered again.
+    delete_message: true
+
+    # Long-polling: wait up to N seconds for messages before returning an empty
+    # poll. 20 = fewer empty ReceiveMessage calls (cheaper). Range 0-20.
+    wait_time_seconds: ${AWS_SQS_WAIT_TIME_SECONDS:20}
+
+    # Messages per poll. Range 1-10.
+    max_number_of_messages: ${AWS_SQS_MAX_MESSAGES:10}
+
+    credentials:
+      # EC2 instance profile ONLY. For ECS task roles / EKS IRSA leave false and
+      # let the default chain resolve them. Setting true forces the EC2 provider.
+      from_ec2_role: ${AWS_SQS_FROM_EC2_ROLE:false}
+      # Static keys — only when running outside AWS. Leave unset with from_ec2_role.
+      id: ${AWS_SQS_ACCESS_KEY_ID:}
+      secret: ${AWS_SQS_SECRET_ACCESS_KEY:}
+      # Assume-role ARN for cross-account access (optional).
+      role: ${AWS_SQS_ROLE_ARN:}
+
+pipeline:
+  processors:
+    # Preserve the original message for potential debugging / DLQ handling.
+    - mapping: |
+        meta.original_event = this.string()
+        meta.sqs_message_id = meta("sqs_message_id")
+        root = this
+
+    # Transform the SQS message body (assumed JSON) to a Flexprice event.
+    # Adjust the field mappings below to match your queue's payload shape.
+    # Unit-tested in output/sqs_mapping_test.go, which parses this exact block.
+    - mapping: |
+        # Required fields
+        root.event_name = this.event_name
+        root.external_customer_id = this.external_customer_id.or(this.customer_id)
+
+        # Properties - ensure all values are strings
+        root.properties = if this.properties.type() == "object" {
+          this.properties.map_each(p -> p.value.string())
+        } else {
+          {}
+        }
+
+        # Source tracking
+        root.source = "aws-sqs-bento"
+
+        # Timestamp handling
+        root.timestamp = this.timestamp.or(now().format_timestamp("2006-01-02T15:04:05Z07:00"))
+
+        # Optional fields
+        root.event_id = this.event_id.or("")
+        root.customer_id = this.customer_id.or("")
+
+    - log:
+        level: INFO
+        message: |
+          [SQS→FLEXPRICE] Processing event:
+          - Event Name: ${!json("event_name")}
+          - Event ID: ${!json("event_id")}
+          - Timestamp: ${!json("timestamp")}
+
+output:
+  flexprice:
+    api_host: ${FLEXPRICE_API_HOST}
+    api_key: ${FLEXPRICE_API_KEY}
+    scheme: ${FLEXPRICE_SCHEME:https}
+
+    # Batching selects the Flexprice endpoint: any active batch policy routes
+    # every flush to the BULK endpoint. count must exceed 1 to activate — a
+    # no-op policy (count=1, no period) leaves single events on the single-event
+    # endpoint. See the env.example "Flexprice output batching" note.
+    batching:
+      count: ${FLEXPRICE_BATCH_COUNT:10}
+      period: ${FLEXPRICE_BATCH_PERIOD:2s}
+
+    max_in_flight: ${FLEXPRICE_MAX_IN_FLIGHT:10}
+
+logger:
+  level: ${LOG_LEVEL:INFO}
+  format: logfmt
+  add_timestamp: true
