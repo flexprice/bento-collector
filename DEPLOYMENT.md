@@ -144,7 +144,7 @@ docker buildx build \
     --platform linux/arm64 \
     --load \
     -t YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/bento-collector:latest \
-    -f Dockerfile.ecs .
+    -f Dockerfile .
 
 # 3. Push the image
 docker push YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/bento-collector:latest

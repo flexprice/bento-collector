@@ -152,7 +152,7 @@ if ! docker buildx build \
     --platform linux/arm64 \
     --load \
     -t "${IMAGE_URI}" \
-    -f Dockerfile.ecs \
+    -f Dockerfile \
     .; then
     print_error "Docker build failed."
     exit 1
