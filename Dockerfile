@@ -8,7 +8,9 @@
 # whole non-native build under QEMU emulation — and because main.go imports
 # bento/public/components/all (~3000 packages), an emulated arm64 build took
 # 40+ minutes in CI. Go cross-compiles natively, so this costs nothing.
-FROM --platform=${BUILDPLATFORM} golang:1.26-alpine AS builder
+ARG GO_VERSION=1.26.5
+ARG ALPINE_VERSION=3.23
+FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
 # Provided automatically by buildx
 ARG TARGETOS
@@ -41,7 +43,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -ldflags="-w -s" -trimpath -o bento-flexprice main.go
 
 # Stage 2: Create minimal runtime image
-FROM alpine:latest
+FROM alpine:${ALPINE_VERSION}
 
 # Install ca-certificates for HTTPS requests
 RUN apk --no-cache add ca-certificates
@@ -53,14 +55,12 @@ RUN addgroup -g 1000 bento && \
 # Set working directory
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /build/bento-flexprice /app/bento-flexprice
-
-# Copy example configurations
-COPY --from=builder /build/examples /app/examples
-
-# Change ownership
-RUN chown -R bento:bento /app
+# Copy binary + configs, owned by bento at copy time (avoids a duplicate
+# chown -R layer that would double these files on disk).
+COPY --from=builder --chown=bento:bento /build/bento-flexprice /app/bento-flexprice
+COPY --from=builder --chown=bento:bento /build/examples /app/examples
+# internal/ holds prod pipelines referenced via -c /app/internal/...
+COPY --from=builder --chown=bento:bento /build/internal /app/internal
 
 # Switch to non-root user
 USER bento

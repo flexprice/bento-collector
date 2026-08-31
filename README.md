@@ -317,8 +317,7 @@ bento-collector/
 │   └── *-authtest.yaml                  # Auth smoke tests (connect, log, drop)
 ├── scripts/
 │   └── build_and_push_ecr.sh            # Build + push to AWS ECR
-├── Dockerfile                           # Production container
-├── Dockerfile.ecs                       # ECS variant
+├── Dockerfile                           # Production container (GHCR + ECR)
 ├── DEPLOYMENT.md                        # ECR / ECS deployment guide
 ├── env.example                          # Environment template
 └── README.md
