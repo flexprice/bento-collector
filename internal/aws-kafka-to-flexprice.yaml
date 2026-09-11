@@ -62,32 +62,71 @@ pipeline:
   processors: []
 
 output:
-  flexprice:
-    api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
-    api_key: ${FLEXPRICE_API_KEY}
-    scheme: ${FLEXPRICE_SCHEME:https}
+  # Malformed events (bad JSON, missing event_name, 400) fail forever otherwise:
+  # the batch nacks, the Kafka offset never commits, and the same message is
+  # redelivered until the partition is stuck. fallback retries a capped number
+  # of times, then routes the poisoned batch to the second branch so the offset
+  # commits and the partition drains. Set FLEXPRICE_DROP_POISON=false to send
+  # failures to the DLQ Kafka topic instead of discarding them.
+  fallback:
+    - retry:
+        max_retries: ${FLEXPRICE_MAX_RETRIES:3}
+        backoff:
+          initial_interval: 1s
+          max_interval: 30s
+        output:
+          flexprice:
+            api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+            api_key: ${FLEXPRICE_API_KEY}
+            scheme: ${FLEXPRICE_SCHEME:https}
 
-    # -------------------------------------------------------------------------
-    # Batching controls WHICH Flexprice endpoint is used. The policy is read
-    # once at startup:
-    #
-    #   * Policy is a no-op  -> a 1-event flush goes to the SINGLE event
-    #                           endpoint; a multi-event flush still goes to bulk.
-    #   * Policy is active   -> EVERY flush goes to the BULK endpoint, including
-    #                           one holding a single event.
-    #
-    # Defaults below are empty/1, which Bento treats as a no-op policy, so out
-    # of the box this config runs in single-event mode. Set FLEXPRICE_BATCH_COUNT
-    # (>1) and/or FLEXPRICE_BATCH_PERIOD to switch the same config to bulk.
-    #
-    # Note: count must be >1 to activate the policy — count=1 on its own is
-    # still a no-op. Batches larger than 1000 are chunked automatically by the
-    # output plugin to respect the bulk API limit.
-    # -------------------------------------------------------------------------
-    batching:
-      count: ${FLEXPRICE_BATCH_COUNT:1}
-      period: ${FLEXPRICE_BATCH_PERIOD:}
-      byte_size: ${FLEXPRICE_BATCH_BYTE_SIZE:0}
+            # -----------------------------------------------------------------
+            # Batching controls WHICH Flexprice endpoint is used. The policy is
+            # read once at startup:
+            #
+            #   * Policy is a no-op  -> a 1-event flush goes to the SINGLE event
+            #                           endpoint; a multi-event flush -> bulk.
+            #   * Policy is active   -> EVERY flush goes to the BULK endpoint,
+            #                           including one holding a single event.
+            #
+            # Defaults below are empty/1, which Bento treats as a no-op policy,
+            # so out of the box this config runs in single-event mode. Set
+            # FLEXPRICE_BATCH_COUNT (>1) and/or FLEXPRICE_BATCH_PERIOD for bulk.
+            #
+            # count must be >1 to activate the policy — count=1 on its own is
+            # still a no-op. Batches over 1000 are chunked automatically by the
+            # output plugin to respect the bulk API limit.
+            #
+            # With bulk batching one poison pill drags its whole batch to the
+            # fallback branch. Keep checkpoint_limit low and prefer the DLQ
+            # branch if losing sibling events matters.
+            # -----------------------------------------------------------------
+            batching:
+              count: ${FLEXPRICE_BATCH_COUNT:1}
+              period: ${FLEXPRICE_BATCH_PERIOD:}
+              byte_size: ${FLEXPRICE_BATCH_BYTE_SIZE:0}
+
+    - switch:
+        cases:
+          - check: '"${FLEXPRICE_DROP_POISON:true}" == "true"'
+            output:
+              drop: {}
+          - output:
+              kafka:
+                addresses:
+                  - ${AWS_KAFKA_BROKERS}
+                topic: ${FLEXPRICE_KAFKA_DLQ_TOPIC:flexprice-bento-dlq}
+                tls:
+                  enabled: ${AWS_KAFKA_TLS_ENABLED:true}
+                sasl:
+                  mechanism: ${AWS_KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
+                  user: ${AWS_KAFKA_SASL_USER:}
+                  password: ${AWS_KAFKA_SASL_PASSWORD:}
+                client_id: ${AWS_KAFKA_CLIENT_ID:flexprice-bento}-dlq
+              processors:
+                - log:
+                    level: WARN
+                    message: "[DLQ] event failed after retries, routed off the partition"
 
 logger:
   level: ${LOG_LEVEL:INFO}
