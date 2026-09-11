@@ -86,27 +86,21 @@ output:
               period: ${FLEXPRICE_BATCH_PERIOD:}
               byte_size: ${FLEXPRICE_BATCH_BYTE_SIZE:0}
 
-    # FLEXPRICE_DLQ_TOPIC set -> route failures there, else drop. The inner
-    # fallback keeps a broken DLQ from re-poisoning the partition.
-    - switch:
-        cases:
-          - check: 'env("FLEXPRICE_DLQ_TOPIC").or("") != ""'
-            output:
-              fallback:
-                - kafka:
-                    addresses:
-                      - ${AWS_KAFKA_BROKERS}
-                    topic: ${FLEXPRICE_DLQ_TOPIC:}
-                    tls:
-                      enabled: ${AWS_KAFKA_TLS_ENABLED:true}
-                    sasl:
-                      mechanism: ${AWS_KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
-                      user: ${AWS_KAFKA_SASL_USER:}
-                      password: ${AWS_KAFKA_SASL_PASSWORD:}
-                    client_id: ${AWS_KAFKA_CLIENT_ID:flexprice-bento}-dlq
-                - drop: {}
-          - output:
-              drop: {}
+    # Failures go to the DLQ topic; drop only if the DLQ send itself fails, so
+    # a misconfigured DLQ cannot re-poison the partition.
+    - fallback:
+        - kafka:
+            addresses:
+              - ${AWS_KAFKA_BROKERS}
+            topic: ${FLEXPRICE_DLQ_TOPIC:flexprice-bento-dlq}
+            tls:
+              enabled: ${AWS_KAFKA_TLS_ENABLED:true}
+            sasl:
+              mechanism: ${AWS_KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
+              user: ${AWS_KAFKA_SASL_USER:}
+              password: ${AWS_KAFKA_SASL_PASSWORD:}
+            client_id: ${AWS_KAFKA_CLIENT_ID:flexprice-bento}-dlq
+        - drop: {}
 
 logger:
   level: ${LOG_LEVEL:INFO}
