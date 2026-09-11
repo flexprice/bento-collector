@@ -1,9 +1,7 @@
 # AWS MSK (Kafka) -> Flexprice API.
 #
-# Reads events from an AWS MSK topic and POSTs each event to the Flexprice
-# ingest API. Transform is intentionally EMPTY (passthrough) — the message is
-# sent to Flexprice as-is. Add mapping processors under `pipeline.processors`
-# later without touching input/output.
+# Reads events from an AWS MSK topic and POSTs each to Flexprice. Property
+# values are coerced to strings; the event is otherwise sent as-is.
 #
 # All connection details are env-driven; this one file covers every MSK
 # listener type by setting two variables — no config edit needed.
@@ -55,39 +53,54 @@ input:
     checkpoint_limit: ${AWS_KAFKA_CHECKPOINT_LIMIT:100}
 
 pipeline:
-  # ---------------------------------------------------------------------------
-  # Transform intentionally EMPTY (passthrough). Event sent to Flexprice exactly
-  # as received from MSK. Add `mapping:` processors here when needed.
-  # ---------------------------------------------------------------------------
-  processors: []
+  processors:
+    # SDK requires properties values to be strings.
+    - mapping: |
+        root = this
+        root.properties = if this.properties.type() == "object" {
+          this.properties.map_each(p -> p.value.string())
+        } else {
+          {}
+        }
 
 output:
-  flexprice:
-    api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
-    api_key: ${FLEXPRICE_API_KEY}
-    scheme: ${FLEXPRICE_SCHEME:https}
+  # After max_retries the poisoned batch goes to the second branch, so the
+  # offset commits and the partition drains instead of looping forever.
+  fallback:
+    - retry:
+        max_retries: ${FLEXPRICE_MAX_RETRIES:3}
+        backoff:
+          initial_interval: 1s
+          max_interval: 30s
+        output:
+          flexprice:
+            api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+            api_key: ${FLEXPRICE_API_KEY}
+            scheme: ${FLEXPRICE_SCHEME:https}
 
-    # -------------------------------------------------------------------------
-    # Batching controls WHICH Flexprice endpoint is used. The policy is read
-    # once at startup:
-    #
-    #   * Policy is a no-op  -> a 1-event flush goes to the SINGLE event
-    #                           endpoint; a multi-event flush still goes to bulk.
-    #   * Policy is active   -> EVERY flush goes to the BULK endpoint, including
-    #                           one holding a single event.
-    #
-    # Defaults below are empty/1, which Bento treats as a no-op policy, so out
-    # of the box this config runs in single-event mode. Set FLEXPRICE_BATCH_COUNT
-    # (>1) and/or FLEXPRICE_BATCH_PERIOD to switch the same config to bulk.
-    #
-    # Note: count must be >1 to activate the policy — count=1 on its own is
-    # still a no-op. Batches larger than 1000 are chunked automatically by the
-    # output plugin to respect the bulk API limit.
-    # -------------------------------------------------------------------------
-    batching:
-      count: ${FLEXPRICE_BATCH_COUNT:1}
-      period: ${FLEXPRICE_BATCH_PERIOD:}
-      byte_size: ${FLEXPRICE_BATCH_BYTE_SIZE:0}
+            # Any active policy (count>1 or period) routes every flush to the
+            # bulk endpoint; a no-op policy keeps single events on the single
+            # endpoint. Batches over 1000 are chunked by the output plugin.
+            batching:
+              count: ${FLEXPRICE_BATCH_COUNT:1}
+              period: ${FLEXPRICE_BATCH_PERIOD:}
+              byte_size: ${FLEXPRICE_BATCH_BYTE_SIZE:0}
+
+    # Failures go to the DLQ topic; drop only if the DLQ send itself fails, so
+    # a misconfigured DLQ cannot re-poison the partition.
+    - fallback:
+        - kafka:
+            addresses:
+              - ${AWS_KAFKA_BROKERS}
+            topic: ${FLEXPRICE_DLQ_TOPIC:flexprice-bento-dlq}
+            tls:
+              enabled: ${AWS_KAFKA_TLS_ENABLED:true}
+            sasl:
+              mechanism: ${AWS_KAFKA_SASL_MECHANISM:SCRAM-SHA-512}
+              user: ${AWS_KAFKA_SASL_USER:}
+              password: ${AWS_KAFKA_SASL_PASSWORD:}
+            client_id: ${AWS_KAFKA_CLIENT_ID:flexprice-bento}-dlq
+        - drop: {}
 
 logger:
   level: ${LOG_LEVEL:INFO}
