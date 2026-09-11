@@ -8,7 +8,7 @@
 # whole non-native build under QEMU emulation — and because main.go imports
 # bento/public/components/all (~3000 packages), an emulated arm64 build took
 # 40+ minutes in CI. Go cross-compiles natively, so this costs nothing.
-ARG GO_VERSION=1.26.5
+ARG GO_VERSION=1.26.6
 ARG ALPINE_VERSION=3.23
 FROM --platform=${BUILDPLATFORM} golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
@@ -45,8 +45,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Stage 2: Create minimal runtime image
 FROM alpine:${ALPINE_VERSION}
 
-# Install ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates
+# Upgrade OS packages to pick up libcrypto/libssl security fixes, then add
+# ca-certificates for HTTPS requests.
+RUN apk --no-cache upgrade && apk --no-cache add ca-certificates
 
 # Create non-root user
 RUN addgroup -g 1000 bento && \
