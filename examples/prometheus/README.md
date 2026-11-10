@@ -77,6 +77,9 @@ and sorted label set. Retrying the same window yields the same IDs. Changing
 source, query text, or labels changes IDs; do not change these while replaying
 already billed windows. A later query may also revise the value for an existing
 ID due to late data: deduplication is not a correction workflow.
+Stable IDs are necessary for safe retries, but do not by themselves prove
+server-side deduplication. Validate replay against your configured billable
+usage aggregation, not just ingestion acknowledgments or distinct event IDs.
 
 ### Failures and production requirements
 
@@ -126,12 +129,17 @@ Each simulation uses a unique event name/source and two synthetic customer IDs,
 so no existing event names or customer usage are reused. It sends three series
 over two windows, then replays the first window. Local mode checks stable IDs
 at a mock sink, **not server-side deduplication**. Cloud mode queries raw events
-to verify storage and checks the same six IDs after a 15-second settling period;
-that is an observed deduplication check, not a proof of exactly-once billing.
+to verify storage, then requires six rows with the same IDs after a 15-second
+settling period. Raw-event readback can contain duplicate rows with identical
+IDs before storage merges them; this strict snapshot check can therefore fail
+despite stable replay IDs. One successful snapshot is not a deduplication
+guarantee. The helper records both row counts and distinct IDs and exits nonzero
+if the replay check fails; it does not test meter aggregation or invoices.
 No customer objects or billing configuration are created. Raw events for unknown
 customers do not establish a billable customer/subscription relationship.
 
-Logs, events, and a machine-readable summary are saved under the ignored
+Logs, initial/replayed events, and a machine-readable replay summary (including
+failed replay checks) are saved under the ignored
 `.simulation-artifacts/<run_id>/` directory. Cloud simulation leaves its test
 usage events in the environment; use a sandbox and retain these IDs for audit.
 

@@ -166,6 +166,7 @@ def main():
         threading.Event().wait(max(0, ready_at - time.time()))
         collect("scheduled")
         events = wait_for(lambda: (e if len(e := read_events()) == 6 else None), 90, "six stored usage events")
+        (artifacts / "events.json").write_text(json.dumps(events, indent=2))
         expected = {(c, r): slope * window for c, r, slope in series}
         ids = event_ids(events)
         assert len(ids) == 6 and None not in ids, "Expected six distinct event IDs"
@@ -185,23 +186,31 @@ def main():
                    PROMETHEUS_POLL_COUNT="1", PROMETHEUS_SCHEDULE="1ms")
         collect("replay")
         if args.cloud:
-            # Allow asynchronous ingestion to settle before claiming deduplication.
+            # This is a raw-row snapshot, not a metering or invoice check.
             threading.Event().wait(15)
             replayed = read_events()
-            assert len(replayed) == 6 and event_ids(replayed) == ids
+            replay_ok = len(replayed) == 6 and event_ids(replayed) == ids
         else:
             assert len(received) == 9
-            replay_ids = event_ids(received[6:])
-            assert len(replay_ids) == 3 and replay_ids.issubset(ids), "Replay IDs changed"
-        (artifacts / "events.json").write_text(json.dumps(events, indent=2))
-        summary = {"passed": True, "cloud": args.cloud, "run_id": run_id,
+            replayed = list(received)
+            replay_ids = event_ids(replayed[6:])
+            replay_ok = len(replay_ids) == 3 and replay_ids.issubset(ids)
+        (artifacts / "replayed-events.json").write_text(json.dumps(replayed, indent=2))
+        summary = {"passed": replay_ok, "ingestion_passed": True,
+                   "cloud": args.cloud, "run_id": run_id,
                    "event_name": env["PROMETHEUS_EVENT_NAME"], "series": len(series),
                    "scheduled_events": len(events), "windows": ends,
                    "window_seconds": window, "replayed_events": 3,
-                   "replay_check": "cloud raw-event deduplication" if args.cloud else "stable IDs at mock sink"}
+                   "rows_after_replay": len(replayed),
+                   "distinct_ids_after_replay": len(event_ids(replayed)),
+                   "replay_ids_stable": event_ids(replayed) == ids,
+                   "replay_check": "cloud raw-row count and stable IDs" if args.cloud else "stable IDs at mock sink"}
         (artifacts / "summary.json").write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary, indent=2))
         print("Artifacts:", artifacts)
+        if not replay_ok:
+            raise RuntimeError("Replay check failed; inspect summary and replayed-events.json. "
+                               "Stable IDs do not guarantee immediate raw-row deduplication or billing correctness.")
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         server.shutdown()
