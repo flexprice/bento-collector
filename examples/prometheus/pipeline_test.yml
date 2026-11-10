@@ -1,0 +1,955 @@
+{
+  "tests": [
+    {
+      "name": "maps a series and preserves billing dimensions",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "json_equals": {
+              "event_id": "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8",
+              "event_name": "prometheus_cpu_usage",
+              "external_customer_id": "cust_a",
+              "timestamp": "2023-11-14T22:14:00Z",
+              "source": "prometheus",
+              "properties": {
+                "customer_id": "cust_a",
+                "instance": "demo:9100",
+                "feature": "compute",
+                "region": "us-east-1",
+                "value": "12.5",
+                "window_seconds": "60",
+                "window_start": "2023-11-14T22:13:00Z",
+                "window_end": "2023-11-14T22:14:00Z"
+              }
+            },
+            "bloblang": "!errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "expands multiple series into separate events",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                },
+                {
+                  "metric": {
+                    "customer_id": "cust_b",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "eu-west-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "3"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "json_equals": {
+              "event_id": "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8",
+              "event_name": "prometheus_cpu_usage",
+              "external_customer_id": "cust_a",
+              "timestamp": "2023-11-14T22:14:00Z",
+              "source": "prometheus",
+              "properties": {
+                "customer_id": "cust_a",
+                "instance": "demo:9100",
+                "feature": "compute",
+                "region": "us-east-1",
+                "value": "12.5",
+                "window_seconds": "60",
+                "window_start": "2023-11-14T22:13:00Z",
+                "window_end": "2023-11-14T22:14:00Z"
+              }
+            },
+            "bloblang": "!errored()"
+          },
+          {
+            "json_equals": {
+              "event_id": "prom_c88d5f6b347a024ffde313f460ebf29fe676b51c556babea907db79bd174c0f3",
+              "event_name": "prometheus_cpu_usage",
+              "external_customer_id": "cust_b",
+              "timestamp": "2023-11-14T22:14:00Z",
+              "source": "prometheus",
+              "properties": {
+                "customer_id": "cust_b",
+                "instance": "demo:9100",
+                "feature": "compute",
+                "region": "eu-west-1",
+                "value": "3",
+                "window_seconds": "60",
+                "window_start": "2023-11-14T22:13:00Z",
+                "window_end": "2023-11-14T22:14:00Z"
+              }
+            },
+            "bloblang": "!errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "replay ID is independent of label order",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "region": "us-east-1",
+                    "feature": "compute",
+                    "instance": "demo:9100",
+                    "customer_id": "cust_a"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "json_equals": {
+              "event_id": "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8",
+              "event_name": "prometheus_cpu_usage",
+              "external_customer_id": "cust_a",
+              "timestamp": "2023-11-14T22:14:00Z",
+              "source": "prometheus",
+              "properties": {
+                "customer_id": "cust_a",
+                "instance": "demo:9100",
+                "feature": "compute",
+                "region": "us-east-1",
+                "value": "12.5",
+                "window_seconds": "60",
+                "window_start": "2023-11-14T22:13:00Z",
+                "window_end": "2023-11-14T22:14:00Z"
+              }
+            },
+            "bloblang": "!errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "empty vector creates no events",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": []
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": []
+    },
+    {
+      "name": "zero usage is a valid delta",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "0"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "json_equals": {
+              "event_id": "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8",
+              "event_name": "prometheus_cpu_usage",
+              "external_customer_id": "cust_a",
+              "timestamp": "2023-11-14T22:14:00Z",
+              "source": "prometheus",
+              "properties": {
+                "customer_id": "cust_a",
+                "instance": "demo:9100",
+                "feature": "compute",
+                "region": "us-east-1",
+                "value": "0",
+                "window_seconds": "60",
+                "window_start": "2023-11-14T22:13:00Z",
+                "window_end": "2023-11-14T22:14:00Z"
+              }
+            },
+            "bloblang": "!errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "scientific notation remains a string property",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "1.25e1"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "json_equals": {
+              "event_id": "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8",
+              "event_name": "prometheus_cpu_usage",
+              "external_customer_id": "cust_a",
+              "timestamp": "2023-11-14T22:14:00Z",
+              "source": "prometheus",
+              "properties": {
+                "customer_id": "cust_a",
+                "instance": "demo:9100",
+                "feature": "compute",
+                "region": "us-east-1",
+                "value": "1.25e1",
+                "window_seconds": "60",
+                "window_start": "2023-11-14T22:13:00Z",
+                "window_end": "2023-11-14T22:14:00Z"
+              }
+            },
+            "bloblang": "!errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "missing customer ID is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "instance": "demo:9100"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "empty customer ID is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "negative deltas are rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "-1"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "NaN is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "NaN"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "positive infinity is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "+Inf"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "negative infinity is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "-Inf"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "malformed numeric value is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "bad"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "wrong evaluation time is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000041,
+                    "12.5"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "query error is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "error",
+            "error": "bad query"
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "scalar result is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "scalar",
+              "result": [
+                1700000040,
+                "12.5"
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "partial data warnings are rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                }
+              ]
+            },
+            "warnings": [
+              "partial response"
+            ]
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "missing result is rejected",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = this"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector"
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "HTTP transport failure never becomes an event",
+      "target_processors": "../prometheus-to-flexprice.yaml#/pipeline/processors",
+      "environment": {
+        "FLEXPRICE_API_KEY": "placeholder"
+      },
+      "mocks": {
+        "prometheus_request": {
+          "mapping": "root = throw(\"HTTP request failed\")"
+        }
+      },
+      "input_batch": [
+        {
+          "json_content": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": [
+                {
+                  "metric": {
+                    "customer_id": "cust_a",
+                    "instance": "demo:9100",
+                    "feature": "compute",
+                    "region": "us-east-1"
+                  },
+                  "value": [
+                    1700000040,
+                    "12.5"
+                  ]
+                }
+              ]
+            }
+          },
+          "metadata": {
+            "query_time": "1700000040",
+            "query": "test_counter_query"
+          }
+        }
+      ],
+      "output_batches": [
+        [
+          {
+            "bloblang": "errored()"
+          }
+        ]
+      ]
+    }
+  ]
+}

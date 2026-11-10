@@ -1,0 +1,101 @@
+# Poll counter deltas, not cumulative totals. See examples/prometheus/README.md.
+http:
+  enabled: false
+
+input:
+  generate:
+    interval: '${PROMETHEUS_SCHEDULE:0 * * * * *}'
+    count: ${PROMETHEUS_POLL_COUNT:0}
+    mapping: |
+      let window = env("PROMETHEUS_WINDOW_SECONDS").or("60").number()
+      let offset = env("PROMETHEUS_QUERY_OFFSET_SECONDS").or("60").number()
+      let fixed_time = env("PROMETHEUS_QUERY_TIME").or("")
+      let end = if $fixed_time != "" {
+        $fixed_time.number()
+      } else {
+        (timestamp_unix() / $window).floor() * $window - $offset
+      }
+      let query = env("PROMETHEUS_QUERY").or("sum(increase(node_cpu_seconds_total{mode!=\"idle\"}[1m])) by (customer_id, instance, feature, region)")
+      meta query_time = $end.string()
+      meta query = $query
+      root = "query=" + $query.escape_url_query() + "&time=" + $end.string()
+
+pipeline:
+  threads: 1
+  processors:
+    - try:
+        - label: prometheus_request
+          http:
+            url: '${PROMETHEUS_URL:http://localhost:9090}/api/v1/query'
+            verb: POST
+            headers:
+              Content-Type: application/x-www-form-urlencoded
+            timeout: 10s
+            retries: 3
+            retry_period: 1s
+        - label: prometheus_response
+          mapping: |
+            root = if this.status != "success" {
+              throw("Prometheus query failed")
+            } else if this.data.resultType != "vector" {
+              throw("Expected a Prometheus instant vector")
+            } else if this.warnings.or([]).length() > 0 {
+              throw("Prometheus returned warnings; refusing potentially partial usage")
+            } else {
+              this.data.result
+            }
+        - unarchive:
+            format: json_array
+        - label: prometheus_event
+          mapping: |
+            let labels = this.metric
+            let customer = $labels.customer_id.or("")
+            let raw_value = this.value.index(1).string()
+            let value = if $raw_value.re_match("^(NaN|[+-]?Inf)$") {
+              throw("Non-finite usage value")
+            } else {
+              $raw_value.number()
+            }
+            let end = this.value.index(0).number()
+            let name = env("PROMETHEUS_EVENT_NAME").or("prometheus_cpu_usage")
+            let source = env("PROMETHEUS_SOURCE").or("prometheus")
+            let window = env("PROMETHEUS_WINDOW_SECONDS").or("60")
+            let identity = [$source, $name, metadata("query"), $window, $end, $labels.key_values().sort_by(pair -> pair.key)]
+            root.event_id = "prom_" + $identity.string().hash("sha256").encode("hex")
+            root.event_name = $name
+            root.external_customer_id = if $customer == "" {
+              throw("Missing customer_id label; cannot attribute usage")
+            } else {
+              $customer
+            }
+            root.timestamp = if $end != metadata("query_time").number() {
+              throw("Unexpected Prometheus evaluation timestamp")
+            } else {
+              $end.ts_format("2006-01-02T15:04:05Z", "UTC")
+            }
+            root.source = $source
+            root.properties = $labels.map_each(pair -> pair.value.string()).merge({
+              "value": if $value < 0 { throw("Negative counter delta") } else { $raw_value },
+              "window_seconds": $window,
+              "window_start": ($end - $window.number()).ts_format("2006-01-02T15:04:05Z", "UTC"),
+              "window_end": $end.ts_format("2006-01-02T15:04:05Z", "UTC")
+            })
+
+output:
+  switch:
+    cases:
+      - check: errored()
+        output:
+          reject: 'Prometheus processing failed: ${! error() }'
+      - output:
+          flexprice:
+            api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+            api_key: ${FLEXPRICE_API_KEY}
+            scheme: ${FLEXPRICE_SCHEME:https}
+            batching:
+              count: 1000
+              period: 1s
+
+logger:
+  level: INFO
+  format: logfmt
