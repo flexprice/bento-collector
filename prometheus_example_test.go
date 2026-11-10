@@ -26,10 +26,6 @@ func TestPrometheusQueryBody(t *testing.T) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		t.Fatal(err)
 	}
-	mapping, err := bloblang.Parse(config.Input.Generate.Mapping)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, fixedTime := range []string{"", "1794302460"} {
 		t.Run("time="+fixedTime, func(t *testing.T) {
 			query := `sum(increase(node_cpu_seconds_total{mode!="idle",region="a+b&c"}[1m])) by (customer_id)`
@@ -37,6 +33,10 @@ func TestPrometheusQueryBody(t *testing.T) {
 			t.Setenv("PROMETHEUS_QUERY_TIME", fixedTime)
 			t.Setenv("PROMETHEUS_WINDOW_SECONDS", "60")
 			t.Setenv("PROMETHEUS_QUERY_OFFSET_SECONDS", "60")
+			mapping, err := bloblang.Parse(config.Input.Generate.Mapping)
+			if err != nil {
+				t.Fatal(err)
+			}
 			message, err := service.NewMessage(nil).BloblangQuery(mapping)
 			if err != nil {
 				t.Fatal(err)
