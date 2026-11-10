@@ -81,6 +81,51 @@ Stable IDs are necessary for safe retries, but do not by themselves prove
 server-side deduplication. Validate replay against your configured billable
 usage aggregation, not just ingestion acknowledgments or distinct event IDs.
 
+### Query windows, event identity, and overlapping runs
+
+Prometheus does not return a usage-event ID or a unique query-response ID. An
+instant-vector result contains each series' labels, evaluation timestamp, and
+value. The collector creates the event identity, with one event **per series
+per window**, not one shared ID for every customer in that window:
+
+```text
+event_id = hash(source, event_name, query, sorted_labels, window_seconds, end_epoch)
+start_epoch = end_epoch - window_seconds
+timestamp = window_end
+```
+
+The end epoch and duration uniquely identify the start/end pair. Do not add
+the current execution time or a random ID: rerunning the same window must keep
+both the event ID and timestamp unchanged. This supplies the same pair to
+Flexprice's event-ID/timestamp deduplication; downstream billed usage still
+needs its own replay validation.
+
+For the five-minute window ending at 12:10, the HTTP request uses
+`/api/v1/query` with `time=12:10` (a full RFC3339 timestamp) and
+`sum(increase(counter[5m])) by (customer_id, ...)`. The range selector covers
+the preceding five minutes. `/api/v1/query_range` is different: it evaluates an
+expression at multiple steps and returns a matrix; those points are not
+automatically non-overlapping usage events.
+
+To use five-minute windows, change all of these together:
+
+```bash
+export PROMETHEUS_SCHEDULE='0 */5 * * * *'
+export PROMETHEUS_WINDOW_SECONDS=300
+export PROMETHEUS_QUERY_OFFSET_SECONDS=300
+export PROMETHEUS_QUERY='sum(increase(node_cpu_seconds_total{mode!="idle"}[5m])) by (customer_id, instance, feature, region)'
+```
+
+Two cron executions for the same canonical window and series emit the same
+ID/timestamp pair. But 12:05–12:10 and 12:08–12:12 are different windows with
+different IDs and overlapping usage. No Prometheus response ID can detect or
+remove that overlap. Production scheduling/backfill must enforce a single
+canonical window grid, keep a durable cursor, and disallow arbitrary overlapping
+ranges. This example aligns scheduled polls but does not enforce a shared
+cursor or validate manually overridden ranges. Retrieving the same window
+later can also yield a revised value after late samples; that needs an explicit
+correction policy rather than another billable event.
+
 ### Failures and production requirements
 
 Empty vectors emit no events (not synthetic zeros). Query failures, warnings,

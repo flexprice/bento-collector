@@ -27,6 +27,39 @@ tests:
         metadata: *meta
     output_batches: [[{"json_equals": {"event_id": "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8", "event_name": "prometheus_cpu_usage", "external_customer_id": "cust_a", "timestamp": "2023-11-14T22:14:00Z", "source": "prometheus", "properties": {"customer_id": "cust_a", "instance": "demo:9100", "feature": "compute", "region": "us-east-1", "value": "12.5", "window_seconds": "60", "window_start": "2023-11-14T22:13:00Z", "window_end": "2023-11-14T22:14:00Z"}}, "bloblang": "!errored()"}]]
 
+  - name: repeating a window preserves its ID and window-end timestamp
+    target_processors: ../prometheus-to-flexprice.yaml#/pipeline/processors
+    environment: *env
+    mocks: *http
+    input_batch:
+      - json_content: &repeated_window {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {"customer_id": "cust_a", "instance": "demo:9100", "feature": "compute", "region": "us-east-1"}, "value": [1700000040, "12.5"]}]}}
+        metadata: *meta
+      - json_content: *repeated_window
+        metadata: *meta
+    output_batches:
+      - - bloblang: &same_identity '!errored() && this.event_id == "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8" && this.timestamp == "2023-11-14T22:14:00Z" && this.properties.window_end == this.timestamp'
+        - bloblang: *same_identity
+
+  - name: the next window has a new ID and end timestamp
+    target_processors: ../prometheus-to-flexprice.yaml#/pipeline/processors
+    environment: *env
+    mocks: *http
+    input_batch:
+      - json_content: {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {"customer_id": "cust_a", "instance": "demo:9100", "feature": "compute", "region": "us-east-1"}, "value": [1700000100, "12.5"]}]}}
+        metadata: {"query_time": "1700000100", "query": "test_counter_query"}
+    output_batches:
+      - - bloblang: '!errored() && this.event_id != "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8" && this.timestamp == "2023-11-14T22:15:00Z" && this.properties.window_start == "2023-11-14T22:14:00Z"'
+
+  - name: a different duration with the same end has a different ID
+    target_processors: ../prometheus-to-flexprice.yaml#/pipeline/processors
+    environment: {"FLEXPRICE_API_KEY": "placeholder", "PROMETHEUS_EVENT_NAME": "prometheus_cpu_usage", "PROMETHEUS_SOURCE": "prometheus", "PROMETHEUS_WINDOW_SECONDS": "300"}
+    mocks: *http
+    input_batch:
+      - json_content: *repeated_window
+        metadata: *meta
+    output_batches:
+      - - bloblang: '!errored() && this.event_id != "prom_2a3e79aba84b26747e89541f84973707705635bbcd2e31fa04b04d2876a9f1e8" && this.timestamp == "2023-11-14T22:14:00Z" && this.properties.window_start == "2023-11-14T22:09:00Z"'
+
   - name: empty vector creates no events
     target_processors: ../prometheus-to-flexprice.yaml#/pipeline/processors
     environment: *env
