@@ -18,7 +18,7 @@ input:
       let query = env("PROMETHEUS_QUERY").or("sum(increase(node_cpu_seconds_total{mode!=\"idle\"}[1m])) by (customer_id, instance, feature, region)")
       meta query_time = $end.string()
       meta query = $query
-      root = "query=" + $query.escape_url_query() + "&time=" + $end.string()
+      root = "query=" + $query.escape_url_query() + "&time=" + $end.ts_format("2006-01-02T15:04:05Z", "UTC").escape_url_query()
 
 pipeline:
   threads: 1
