@@ -22,6 +22,10 @@ ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "prom/prometheus:v3.5.1"
 
 
+def event_ids(events):
+    return {event.get("event_id") or event.get("id") for event in events}
+
+
 def request(url, payload=None, key=None):
     headers = {"Content-Type": "application/json"}
     if key:
@@ -163,7 +167,7 @@ def main():
         collect("scheduled")
         events = wait_for(lambda: (e if len(e := read_events()) == 6 else None), 90, "six stored usage events")
         expected = {(c, r): slope * window for c, r, slope in series}
-        ids = {e.get("event_id", e.get("id")) for e in events}
+        ids = event_ids(events)
         assert len(ids) == 6 and None not in ids, "Expected six distinct event IDs"
         ends = sorted({e["properties"]["window_end"] for e in events})
         assert len(ends) == 2, "Expected two query windows"
@@ -184,10 +188,10 @@ def main():
             # Allow asynchronous ingestion to settle before claiming deduplication.
             threading.Event().wait(15)
             replayed = read_events()
-            assert len(replayed) == 6 and {e.get("id", e.get("event_id")) for e in replayed} == ids
+            assert len(replayed) == 6 and event_ids(replayed) == ids
         else:
             assert len(received) == 9
-            replay_ids = {e["event_id"] for e in received[6:]}
+            replay_ids = event_ids(received[6:])
             assert len(replay_ids) == 3 and replay_ids.issubset(ids), "Replay IDs changed"
         (artifacts / "events.json").write_text(json.dumps(events, indent=2))
         summary = {"passed": True, "cloud": args.cloud, "run_id": run_id,
