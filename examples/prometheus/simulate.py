@@ -26,6 +26,10 @@ def event_ids(events):
     return {event.get("event_id") or event.get("id") for event in events}
 
 
+def event_keys(events):
+    return {(event.get("event_id") or event.get("id"), event["timestamp"]) for event in events}
+
+
 def request(url, payload=None, key=None):
     headers = {"Content-Type": "application/json"}
     if key:
@@ -169,6 +173,7 @@ def main():
         (artifacts / "events.json").write_text(json.dumps(events, indent=2))
         expected = {(c, r): slope * window for c, r, slope in series}
         ids = event_ids(events)
+        keys = event_keys(events)
         assert len(ids) == 6 and None not in ids, "Expected six distinct event IDs"
         ends = sorted({e["properties"]["window_end"] for e in events})
         assert len(ends) == 2, "Expected two query windows"
@@ -189,12 +194,12 @@ def main():
             # This is a raw-row snapshot, not a metering or invoice check.
             threading.Event().wait(15)
             replayed = read_events()
-            replay_ok = len(replayed) == 6 and event_ids(replayed) == ids
+            replay_ok = len(replayed) == 6 and event_keys(replayed) == keys
         else:
             assert len(received) == 9
             replayed = list(received)
-            replay_ids = event_ids(replayed[6:])
-            replay_ok = len(replay_ids) == 3 and replay_ids.issubset(ids)
+            replay_keys = event_keys(replayed[6:])
+            replay_ok = len(replay_keys) == 3 and replay_keys.issubset(keys)
         (artifacts / "replayed-events.json").write_text(json.dumps(replayed, indent=2))
         summary = {"passed": replay_ok, "ingestion_passed": True,
                    "cloud": args.cloud, "run_id": run_id,
@@ -204,7 +209,8 @@ def main():
                    "rows_after_replay": len(replayed),
                    "distinct_ids_after_replay": len(event_ids(replayed)),
                    "replay_ids_stable": event_ids(replayed) == ids,
-                   "replay_check": "cloud raw-row count and stable IDs" if args.cloud else "stable IDs at mock sink"}
+                   "replay_id_timestamp_pairs_stable": event_keys(replayed) == keys,
+                   "replay_check": "cloud raw-row count and stable ID/timestamp pairs" if args.cloud else "stable ID/timestamp pairs at mock sink"}
         (artifacts / "summary.json").write_text(json.dumps(summary, indent=2))
         print(json.dumps(summary, indent=2))
         print("Artifacts:", artifacts)

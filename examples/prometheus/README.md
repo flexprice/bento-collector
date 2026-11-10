@@ -1,198 +1,92 @@
 # Prometheus → Flexprice
 
-Flexprice Collector can use Bento's existing `generate` input and `http`
-processor to poll Prometheus. No native Prometheus input plugin is required.
-The [example config](../prometheus-to-flexprice.yaml) turns each instant-vector
-series into one Flexprice event for one customer and one query window.
+Use Bento's `generate` + `http` to turn customer-labeled counter deltas into
+windowed usage events. **For accurate, auditable per-operation billing, prefer
+sending usage events directly to Flexprice.** This example is not a durable collector.
 
-```text
-Application counters → Prometheus scrapes → scheduled PromQL instant query
-  → validate response → split series → map customer / timestamp / properties
-  → Flexprice event ingestion → your configured usage meter
-```
-
-This is a polling integration example, not a durable billing collector. It does
-not create customers, meters, plans, subscriptions, prices, or invoices.
-
-## Run the collector
-
-Build from the repository root, as in the main README:
+## Run
 
 ```bash
 go build -o bento-flexprice main.go
 export PROMETHEUS_URL=http://localhost:9090
 export FLEXPRICE_API_HOST=api.cloud.flexprice.io
 export FLEXPRICE_API_KEY=your_api_key_here
-./bento-flexprice lint examples/prometheus-to-flexprice.yaml
 ./bento-flexprice -c examples/prometheus-to-flexprice.yaml
 ```
 
-`api_host` is **only a hostname** (and optionally port). Do not include a scheme
-or `/v1`: the output plugin/SDK supplies the API path. The HTTP processor sends
-the current message as its request body; it does **not** accept a `payload`
-field. The generate mapping builds a URL-encoded form body before the request.
-
-The example assumes this counter has a `customer_id` label:
+`FLEXPRICE_API_HOST` is a hostname, not a URL or `/v1`.
+[All settings](../prometheus-to-flexprice.yaml) are environment-configurable.
+Defaults: minute cron `0 * * * * *`, 60-second windows, 60-second query delay.
 
 ```promql
 sum(increase(node_cpu_seconds_total{mode!="idle"}[1m]))
   by (customer_id, instance, feature, region)
 ```
 
-Ordinary node-exporter CPU metrics do **not** have customer attribution. The
-simulator deliberately adds labels to demonstrate the mapping. Use your own
-customer-labeled counter or a trusted instance-to-customer enrichment step;
-never silently use an instance name as a customer ID. Keep every dimension you
-need to bill on in the `by` clause. Labels removed there cannot be recovered.
+Ordinary node-exporter metrics lack `customer_id`; supply labeled counters or
+trusted enrichment. Preserve pricing dimensions in `by (...)`. This value is
+**CPU-seconds, not CPU percentage**: configure a **SUM of `properties.value`**,
+not COUNT. Properties preserve labels, value, and window bounds as strings.
 
-### Configuration
+## IDs and timestamps
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PROMETHEUS_URL` | `http://localhost:9090` | Prometheus HTTP API |
-| `PROMETHEUS_SCHEDULE` | `0 * * * * *` | Six-field cron, once per minute |
-| `PROMETHEUS_QUERY` | Counter query above | Must return an instant vector |
-| `PROMETHEUS_WINDOW_SECONDS` | `60` | Alignment and event window metadata |
-| `PROMETHEUS_QUERY_OFFSET_SECONDS` | `60` | Delay for completed scrape windows |
-| `PROMETHEUS_QUERY_TIME` | Unset | Fixed Unix-seconds evaluation time for replay |
-| `PROMETHEUS_POLL_COUNT` | `0` | Unlimited; set a positive count for a bounded run |
-| `PROMETHEUS_EVENT_NAME` | `prometheus_cpu_usage` | Flexprice event name |
-| `PROMETHEUS_SOURCE` | `prometheus` | Stable source identity; make unique per Prometheus dataset |
-
-**Change the schedule, PromQL range, window seconds, and delay together.** A
-10-second schedule with a 60-second query double-counts overlapping usage. The
-default evaluates at `floor(now / 60) * 60 - 60`: a delayed, aligned window end,
-not a jittered "now". Events use that evaluation timestamp, not ingestion time.
-The `increase` value is CPU-seconds across the window, not a CPU percentage.
-
-Each event has `external_customer_id`, an RFC3339 UTC `timestamp`, and string
-properties containing the returned labels, `value`, `window_seconds`,
-`window_start`, and `window_end`. Configure a **SUM of `properties.value`**, not
-COUNT of events, if you want to meter this delta. SUM and customer billing still
-require your own correctly configured meter and subscription; this example
-does not prove invoice amounts.
-
-The event ID hashes the source, event name, query, window size, evaluation time,
-and sorted label set. Retrying the same window yields the same IDs. Changing
-source, query text, or labels changes IDs; do not change these while replaying
-already billed windows. A later query may also revise the value for an existing
-ID due to late data: deduplication is not a correction workflow.
-Stable IDs are necessary for safe retries, but do not by themselves prove
-server-side deduplication. Validate replay against your configured billable
-usage aggregation, not just ingestion acknowledgments or distinct event IDs.
-
-### Query windows, event identity, and overlapping runs
-
-Prometheus does not return a usage-event ID or a unique query-response ID. An
-instant-vector result contains each series' labels, evaluation timestamp, and
-value. The collector creates the event identity, with one event **per series
-per window**, not one shared ID for every customer in that window:
+Prometheus supplies labels, an evaluation timestamp, and a value—**no unique
+usage-event/response ID**. We call `/api/v1/query` at a fixed window end with
+`increase(counter[1m])`. The lookback defines the window; `/query_range` instead
+returns multiple evaluation points.
 
 ```text
-event_id = hash(source, event_name, query, sorted_labels, window_seconds, end_epoch)
 start_epoch = end_epoch - window_seconds
+event_id = hash(source, event_name, query, sorted_labels, window_seconds, end_epoch)
 timestamp = window_end
 ```
 
-The end epoch and duration uniquely identify the start/end pair. Do not add
-the current execution time or a random ID: rerunning the same window must keep
-both the event ID and timestamp unchanged. This supplies the same pair to
-Flexprice's event-ID/timestamp deduplication; downstream billed usage still
-needs its own replay validation.
+One ID is generated **per series per window**. Flexprice dedupes on **event ID
++ timestamp**; replay must preserve both. Never use execution time as the event
+timestamp or add randomness to the ID. Keep source, query text, and labels stable.
 
-For the five-minute window ending at 12:10, the HTTP request uses
-`/api/v1/query` with `time=12:10` (a full RFC3339 timestamp) and
-`sum(increase(counter[5m])) by (customer_id, ...)`. The range selector covers
-the preceding five minutes. `/api/v1/query_range` is different: it evaluates an
-expression at multiple steps and returns a matrix; those points are not
-automatically non-overlapping usage events.
+Scheduled ends are aligned: `floor(now / window) * window - offset`.
+For five-minute windows, use cron `0 */5 * * * *`, query range `[5m]`,
+and window/offset `300`. Set `PROMETHEUS_QUERY_TIME` to a fixed end epoch for replay.
 
-To use five-minute windows, change all of these together:
+## Billing gotchas
 
-```bash
-export PROMETHEUS_SCHEDULE='0 */5 * * * *'
-export PROMETHEUS_WINDOW_SECONDS=300
-export PROMETHEUS_QUERY_OFFSET_SECONDS=300
-export PROMETHEUS_QUERY='sum(increase(node_cpu_seconds_total{mode!="idle"}[5m])) by (customer_id, instance, feature, region)'
-```
+- **Overlap:** 12:05–12:10 and 12:08–12:12 get different IDs but overlap usage.
+  Enforce canonical non-overlapping windows, including manual runs.
+- **Durability:** add a persistent cursor, downtime backfill, and HA coordination;
+  this memory-only example does not provide them.
+- **Accuracy:** `increase()` extrapolates samples. Scrape gaps, resets, and late
+  samples can lose/revise usage; replay is not a correction workflow.
+- **Attribution:** preserve customer/pricing labels and assess their cardinality.
+- **Dedupe:** test billed SUM under replay. Raw readback can show unmerged duplicate
+  ID/timestamp pairs; raw counts or stable IDs alone do not prove invoice correctness.
 
-Two cron executions for the same canonical window and series emit the same
-ID/timestamp pair. But 12:05–12:10 and 12:08–12:12 are different windows with
-different IDs and overlapping usage. No Prometheus response ID can detect or
-remove that overlap. Production scheduling/backfill must enforce a single
-canonical window grid, keep a durable cursor, and disallow arbitrary overlapping
-ranges. This example aligns scheduled polls but does not enforce a shared
-cursor or validate manually overridden ranges. Retrieving the same window
-later can also yield a revised value after late samples; that needs an explicit
-correction policy rather than another billable event.
+Errors, warnings, non-vector results, missing customers, invalid/negative values,
+and wrong timestamps are rejected. Empty vectors emit no events, not zeros.
+Nack retries can resend partial successes. Monitor errors/empty results and
+configure Prometheus auth/TLS. Original operations cannot be reconstructed.
 
-### Failures and production requirements
+## Verify
 
-Empty vectors emit no events (not synthetic zeros). Query failures, warnings,
-non-vector responses, missing customer labels, invalid/negative/non-finite
-values, and mismatched timestamps are rejected, rather than sent as usage.
-The generate input's default nack replay retries the original fixed query
-body; partial successes can be resent with the same IDs. An invalid series can
-therefore block/retry a whole poll until fixed. Monitor errors and empty results.
-
-Before billing real customers:
-
-- Persist a window cursor and pending events; the generate input is memory-only.
-- Backfill every missed window after downtime; this config only polls the latest.
-- Deduplicate HA Prometheus replicas and overlapping collectors before aggregation.
-- Account for scrape loss, late samples, retention, resets, and extrapolation.
-- Add the authentication/TLS settings required by your Prometheus deployment.
-- Size customer-label cardinality and preserve all pricing dimensions.
-- Settle window-boundary ownership with your billing periods and test it explicitly.
-
-Prometheus can support **aggregated customer usage billing** when the required
-customer identifiers and dimensions exist; raw per-request events are not
-always necessary. However, `increase()` extrapolates sampled counters and may
-produce fractional estimates. Resets between scrapes can lose usage; raw request
-details cannot be reconstructed. A durable source of usage events is preferable
-when exact, auditable per-operation billing is required.
-
-## Reproduce the simulation
-
-Requires Python 3.8+, Docker, and the built collector. The helper uses Linux
-Docker host networking; Docker Desktop users need host-networking support.
-It starts its own labeled counter exporter and a pinned real Prometheus server,
-then cleans up both. By default, events go only to a local mock Flexprice sink.
+Requires Python 3.8+, Docker host networking, and the built collector:
 
 ```bash
 ./bento-flexprice test examples/prometheus/pipeline_test.yml
+python3 -m unittest discover -s examples/prometheus -p 'test_*.py'
 python3 examples/prometheus/simulate.py
-
-# Full minute cron and 60-second query windows (several minutes):
 python3 examples/prometheus/simulate.py --window-seconds 60
-
-# Explicit opt-in to real cloud writes using the environment variables above:
+# Explicit opt-in: writes isolated usage to your Flexprice environment.
 python3 examples/prometheus/simulate.py --cloud
 ```
 
-Each simulation uses a unique event name/source and two synthetic customer IDs,
-so no existing event names or customer usage are reused. It sends three series
-over two windows, then replays the first window. Local mode checks stable IDs
-at a mock sink, **not server-side deduplication**. Cloud mode queries raw events
-to verify storage, then requires six rows with the same IDs after a 15-second
-settling period. Raw-event readback can contain duplicate rows with identical
-IDs before storage merges them; this strict snapshot check can therefore fail
-despite stable replay IDs. One successful snapshot is not a deduplication
-guarantee. The helper records both row counts and distinct IDs and exits nonzero
-if the replay check fails; it does not test meter aggregation or invoices.
-No customer objects or billing configuration are created. Raw events for unknown
-customers do not establish a billable customer/subscription relationship.
+The helper sends three synthetic series over two windows, then replays one.
+Local mode verifies identical ID/timestamp pairs; cloud mode also requires six
+raw rows after 15 seconds. Unmerged duplicates fail that strict snapshot check.
+This does not test invoices or create customers, meters, plans, or subscriptions.
 
-Logs, initial/replayed events, and a machine-readable replay summary (including
-failed replay checks) are saved under the ignored
-`.simulation-artifacts/<run_id>/` directory. Cloud simulation leaves its test
-usage events in the environment; use a sandbox and retain these IDs for audit.
+Logs, events, and replay summaries (including failures) are saved under ignored
+`.simulation-artifacts/<run_id>/`. Cloud test usage remains; use a sandbox.
+The exporter and Prometheus are cleaned up automatically.
 
-## References
-
-- [Bento generate input](https://warpstreamlabs.github.io/bento/docs/components/inputs/generate/)
-- [Bento HTTP processor](https://warpstreamlabs.github.io/bento/docs/components/processors/http/)
-- [Prometheus instant query API](https://prometheus.io/docs/prometheus/latest/querying/api/#instant-queries)
-- [Prometheus increase semantics](https://prometheus.io/docs/prometheus/latest/querying/functions/#increase)
-- [Kong's Prometheus collector and billing accuracy warning](https://developer.konghq.com/metering-and-billing/collectors/prometheus/)
-- [Flexprice event ingestion](https://docs.flexprice.io/api-reference/events/ingest-event)
+[Prometheus API](https://prometheus.io/docs/prometheus/latest/querying/api/) ·
+[increase()](https://prometheus.io/docs/prometheus/latest/querying/functions/#increase)
