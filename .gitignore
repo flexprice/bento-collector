@@ -6,3 +6,5 @@ bento-flexprice
 # sample json files in examples
 examples/*.json
 internal/*.json
+.simulation-artifacts/
+__pycache__/

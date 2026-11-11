@@ -132,6 +132,12 @@ jobs:
           done < <(find examples internal -name '*.yaml' | sort)
           exit "$failed"
 
+      - name: Test Prometheus event mapping
+        run: ./bento-flexprice test examples/prometheus/pipeline_test.yml
+
+      - name: Test Prometheus simulator helpers
+        run: python3 -m unittest discover -s examples/prometheus -p 'test_*.py'
+
   # Proves the image still builds on PRs, without pushing anything.
   # Publishing happens only on a version tag — see publish-image.yml.
   docker-build:
