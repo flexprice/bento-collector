@@ -133,7 +133,7 @@ jobs:
           exit "$failed"
 
       - name: Test Prometheus event mapping
-        run: ./bento-flexprice test examples/prometheus/pipeline_test.yml
+        run: ./bento-flexprice test examples/prometheus/pipeline_test.yml examples/prometheus/customer_test.yml
 
       - name: Test Prometheus simulator helpers
         run: python3 -m unittest discover -s examples/prometheus -p 'test_*.py'
