@@ -1,0 +1,111 @@
+# Tenant-scoped daily totals, not counter increases. See customer-guide.md.
+http:
+  enabled: false
+
+input:
+  generate:
+    interval: '${PROMETHEUS_SCHEDULE:0 15 0 * * *}'
+    count: ${PROMETHEUS_POLL_COUNT:0}
+    mapping: |
+      let day = env("PROMETHEUS_DAY").or("")
+      let end = if $day == "" {
+        (timestamp_unix() / 86400).floor() * 86400
+      } else {
+        ($day + "T00:00:00Z").ts_parse("2006-01-02T15:04:05Z").ts_unix() + 86400
+      }
+      let usage_day = ($end - 86400).ts_format("2006-01-02", "UTC")
+      let mode = env("PROMETHEUS_METRIC_MODE").or("window")
+      let time = if $mode == "usage_date" {
+        env("PROMETHEUS_QUERY_TIME").or(timestamp_unix().floor()).number()
+      } else { $end }
+      let query = env("PROMETHEUS_QUERY").replace_all("__USAGE_DATE__", $usage_day)
+      meta query_time = $time.string()
+      meta window_end = $end.string()
+      meta usage_day = $usage_day
+      meta query = $query
+      root = "query=" + $query.escape_url_query() + "&time=" + $time.ts_format("2006-01-02T15:04:05Z", "UTC").escape_url_query()
+
+pipeline:
+  threads: 1
+  processors:
+    - try:
+        - label: customer_prometheus_request
+          http:
+            url: '${PROMETHEUS_URL:http://localhost:9090}/api/v1/query'
+            verb: POST
+            headers:
+              Content-Type: application/x-www-form-urlencoded
+            timeout: 10s
+            retries: 3
+        - mapping: |
+            root = if this.status != "success" {
+              throw("Prometheus query failed")
+            } else if this.data.resultType != "vector" {
+              throw("Expected an instant vector")
+            } else if this.warnings.or([]).length() > 0 {
+              throw("Prometheus returned potentially partial usage")
+            } else { this.data.result }
+        - unarchive:
+            format: json_array
+        - label: customer_daily_event
+          mapping: |
+            let labels = this.metric
+            let customer = env("FLEXPRICE_CUSTOMER_ID").or("")
+            let tenant = env("PROMETHEUS_TENANT_ID").or("")
+            let raw = this.value.index(1).string()
+            let value = if $raw.re_match("^(NaN|[+-]?Inf)$") {
+              throw("Non-finite usage")
+            } else { $raw.number() }
+            let evaluation = this.value.index(0).number()
+            let end = metadata("window_end").number()
+            let mode = env("PROMETHEUS_METRIC_MODE").or("window")
+            let unit = env("PROMETHEUS_METRIC_UNIT").or("")
+            let name = env("PROMETHEUS_EVENT_NAME").or("prometheus_daily_usage")
+            let source = env("PROMETHEUS_SOURCE").or("prometheus_customer_guide")
+            let identity = [$source, $name, $tenant, $customer, metadata("query"), 86400, $end, $labels.key_values().sort_by(pair -> pair.key)]
+            root = if $customer == "" || $tenant == "" || $unit == "" {
+              throw("Explicit tenant, customer mapping, and unit are required")
+            } else if $mode != "window" && $mode != "usage_date" {
+              throw("Unknown metric mode")
+            } else if $evaluation != metadata("query_time").number() {
+              throw("Unexpected evaluation timestamp")
+            } else if $mode == "window" && $evaluation != $end {
+              throw("Daily totals must be evaluated at the window end")
+            } else if $mode == "usage_date" && $labels.usage_date.or("") != metadata("usage_day") {
+              throw("Snapshot usage_date does not match the requested day")
+            } else if $mode == "usage_date" && $end > $evaluation {
+              throw("Cannot emit an unfinished usage day")
+            } else if ($unit == "core_hours" || $unit == "GB_hours") && $labels.instance.or("") == "" {
+              throw("Missing data-service instance")
+            } else if $value < 0 {
+              throw("Negative usage")
+            } else {
+              {
+                "event_id": "prom_" + $identity.string().hash("sha256").encode("hex"),
+                "event_name": $name,
+                "external_customer_id": $customer,
+                "timestamp": $end.ts_format("2006-01-02T15:04:05Z", "UTC"),
+                "source": $source,
+                "properties": $labels.map_each(pair -> pair.value.string()).merge({
+                  "tenant_id": $tenant, "value": $raw, "unit": $unit,
+                  "window_seconds": "86400",
+                  "window_start": ($end - 86400).ts_format("2006-01-02T15:04:05Z", "UTC"),
+                  "window_end": $end.ts_format("2006-01-02T15:04:05Z", "UTC")
+                })
+              }
+            }
+
+output:
+  switch:
+    cases:
+      - check: errored()
+        output:
+          reject: 'Customer Prometheus mapping failed: ${! error() }'
+      - output:
+          flexprice:
+            api_host: ${FLEXPRICE_API_HOST:api.cloud.flexprice.io}
+            api_key: ${FLEXPRICE_API_KEY}
+            scheme: ${FLEXPRICE_SCHEME:https}
+            batching:
+              count: 1000
+              period: 1s

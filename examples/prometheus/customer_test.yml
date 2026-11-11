@@ -1,0 +1,68 @@
+tests:
+  - name: daily total uses explicit customer and UTC window-end timestamp
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: &env {"FLEXPRICE_API_KEY": "placeholder", "FLEXPRICE_CUSTOMER_ID": "customer_a", "PROMETHEUS_TENANT_ID": "tenant_a", "PROMETHEUS_METRIC_UNIT": "GB", "PROMETHEUS_METRIC_MODE": "window"}
+    mocks: &http {"customer_prometheus_request": {"mapping": "root = this"}}
+    input_batch:
+      - json_content: &daily {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}, "value": [1700006400, "15"]}]}}
+        metadata: &meta {"query_time": "1700006400", "window_end": "1700006400", "usage_day": "2023-11-14", "query": "tenant_scoped_query"}
+    output_batches:
+      - - bloblang: '!errored() && this.external_customer_id == "customer_a" && this.timestamp == "2023-11-15T00:00:00Z" && this.properties.window_start == "2023-11-14T00:00:00Z" && this.properties.value == "15" && this.properties.tenant_id == "tenant_a"'
+
+  - name: usage_date snapshot timestamp is day end not retrieval time
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: &snapshot_env {"FLEXPRICE_API_KEY": "placeholder", "FLEXPRICE_CUSTOMER_ID": "customer_a", "PROMETHEUS_TENANT_ID": "tenant_a", "PROMETHEUS_METRIC_UNIT": "GB", "PROMETHEUS_METRIC_MODE": "usage_date"}
+    mocks: *http
+    input_batch:
+      - json_content: {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {"usage_date": "2023-11-14"}, "value": [1700006460, "200"]}]}}
+        metadata: {"query_time": "1700006460", "window_end": "1700006400", "usage_day": "2023-11-14", "query": "tenant_scoped_query"}
+    output_batches:
+      - - bloblang: '!errored() && this.timestamp == "2023-11-15T00:00:00Z" && this.properties.usage_date == "2023-11-14"'
+
+  - name: wrong usage_date is rejected
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: *snapshot_env
+    mocks: *http
+    input_batch:
+      - json_content: {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {"usage_date": "2023-11-13"}, "value": [1700006400, "200"]}]}}
+        metadata: *meta
+    output_batches: [[{"bloblang": "errored()"}]]
+
+  - name: missing customer mapping is rejected
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: {"FLEXPRICE_API_KEY": "placeholder", "FLEXPRICE_CUSTOMER_ID": "", "PROMETHEUS_TENANT_ID": "tenant_a", "PROMETHEUS_METRIC_UNIT": "GB", "PROMETHEUS_METRIC_MODE": "window"}
+    mocks: *http
+    input_batch: [{json_content: *daily, metadata: *meta}]
+    output_batches: [[{"bloblang": "errored()"}]]
+
+  - name: unexpected evaluation time is rejected
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: *env
+    mocks: *http
+    input_batch: [{json_content: *daily, metadata: {"query_time": "1700006460", "window_end": "1700006400", "usage_day": "2023-11-14", "query": "tenant_scoped_query"}}]
+    output_batches: [[{"bloblang": "errored()"}]]
+
+  - name: reservations require the data-service instance
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: {"FLEXPRICE_API_KEY": "placeholder", "FLEXPRICE_CUSTOMER_ID": "customer_a", "PROMETHEUS_TENANT_ID": "tenant_a", "PROMETHEUS_METRIC_UNIT": "core_hours", "PROMETHEUS_METRIC_MODE": "window"}
+    mocks: *http
+    input_batch: [{json_content: *daily, metadata: *meta}]
+    output_batches: [[{"bloblang": "errored()"}]]
+
+  - name: unfinished usage day is rejected
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: *snapshot_env
+    mocks: *http
+    input_batch:
+      - json_content: {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {"usage_date": "2023-11-14"}, "value": [1699920060, "200"]}]}}
+        metadata: {"query_time": "1699920060", "window_end": "1700006400", "usage_day": "2023-11-14", "query": "tenant_scoped_query"}
+    output_batches: [[{"bloblang": "errored()"}]]
+
+  - name: empty vector is not a zero usage event
+    target_processors: customer-daily.yaml#/pipeline/processors
+    environment: *env
+    mocks: *http
+    input_batch:
+      - json_content: {"status": "success", "data": {"resultType": "vector", "result": []}}
+        metadata: *meta
+    output_batches: []

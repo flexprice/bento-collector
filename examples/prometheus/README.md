@@ -1,5 +1,7 @@
 # Prometheus → Flexprice
 
+For daily gauge totals and `usage_date` snapshots, see [the companion example](customer-guide.md).
+
 Use Bento's `generate` + `http` to turn customer-labeled counter deltas into
 windowed usage events. **For accurate, auditable per-operation billing, prefer
 sending usage events directly to Flexprice.** This example is not a durable collector.
