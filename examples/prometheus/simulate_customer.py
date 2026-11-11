@@ -104,13 +104,13 @@ def main():
         assert result["data"]["resultType"] == "vector", result
         return result["data"]["result"]
 
-    def collect(metric, name, settings=None):
+    def collect(metric, name, settings=None, usage_day=None):
         cfg = dict(env, PROMETHEUS_EVENT_NAME="customer_simulation_" + run_id + "_" + metric)
         cfg.update(settings or {})
         with (artifacts / (name + ".log")).open("w") as log:
             subprocess.run(["python3", str(ROOT / "examples/prometheus/customer_queries.py"),
                             "--metric", metric, "--tenant", "tenant_demo", "--customer", "sim_" + run_id,
-                            "--day", day], env=cfg, stdout=log, stderr=subprocess.STDOUT, timeout=45, check=True)
+                            "--day", usage_day or day], env=cfg, stdout=log, stderr=subprocess.STDOUT, timeout=45, check=True)
 
     try:
         subprocess.run(["docker", "run", "--rm", "--user", uid, *mount,
@@ -147,6 +147,10 @@ def main():
         late = received[-1]
         original = next(e for e in initial if e["event_name"].endswith("spark_data_written_gb"))
         assert event_keys([late]) == event_keys([original]) and float(late["properties"]["value"]) == 250
+        prior_day = dt.date.fromisoformat(day) - dt.timedelta(days=1)
+        collect("cpu_hours", "prior_day", usage_day=prior_day.isoformat())
+        assert len(received) == 29 and event_keys(received[-2:]).isdisjoint(keys)
+        assert all(e["timestamp"] == dt.datetime.fromtimestamp(end - 86400, dt.timezone.utc).isoformat().replace("+00:00", "Z") for e in received[-2:])
         coverage = query("count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440")
         assert float(coverage[0]["value"][1]) == 1
         partial = query(query_for("cpu_hours", "tenant_partial"))
@@ -163,7 +167,6 @@ def main():
             assert len(row["values"]) == 7 and all(float(v[1]) in (72, 96) for v in row["values"])
         spark_query = query_for("spark_data_written_gb", "tenant_demo").replace(', usage_date="__USAGE_DATE__"', "")
         assert sorted(float(r["value"][1]) for r in query(spark_query, end + 60)) == [100, 200]
-        prior_day = dt.date.fromisoformat(day) - dt.timedelta(days=1)
         multi_day = (f'sum(dpr_spark_data_volume{{trn="tenant_demo",metric_name="bytes_written",'
                      f'usage_date=~"{prior_day}|{day}"}}) / 1000000000')
         assert float(query(multi_day, end + 60)[0]["value"][1]) == 300
@@ -196,6 +199,7 @@ def main():
         summary = {"passed": True, "day": day, "event_prefix": "customer_simulation_" + run_id,
                    "metric_variants": len(METRICS), "events": len(initial), "replayed_events": 13,
                    "stable_id_timestamp_pairs": True, "late_snapshot_same_key_new_value": True,
+                   "different_day_different_id_timestamp_pairs": True,
                    "global_coverage_can_miss_series_gaps": True, "cumulative_last_value_is_not_daily_delta": True,
                    "thirty_second_samples_double_reserved_total": True,
                    "weekly_anchored_queries": True, "daily_graph_and_spark_date_ranges": True,
