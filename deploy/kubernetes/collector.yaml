@@ -1,16 +1,38 @@
 # Self-hosted collector next to Prometheus: the UI/API (Deployment) and a daily
 # run of every saved collector (CronJob). Both share the spec volume.
 #
+# Connections are owned by this deployment (ConfigMap below); the UI only manages
+# collectors. Credentials come from your Secret as environment variables:
+#
 #   kubectl create namespace flexprice-collector
 #   kubectl -n flexprice-collector create secret generic collector-secrets \
-#     --from-literal=syncron-prom='<prometheus password or token>' \
-#     --from-literal=flexprice='<flexprice api key>' \
+#     --from-literal=prometheus-password='<prometheus password or token>' \
+#     --from-literal=flexprice-api-key='<flexprice api key>' \
 #     --from-literal=ui-token='<token people use to open the UI>'
 #   kubectl -n flexprice-collector apply -f collector.yaml
 #   kubectl -n flexprice-collector port-forward svc/collector-ui 8090:8090
 #
-# In the UI, name each connection's secret after a key above (secret_ref).
-# The Secret is mounted read-only, so the UI cannot write secret values here.
+# The Secret can be synced from AWS/GCP Secrets Manager or Vault by External
+# Secrets Operator; the collector only reads the environment variables.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: collector-connections
+data:
+  connections.yaml: |
+    connections:
+      - id: prometheus
+        type: prometheus
+        url: http://prometheus-server.monitoring.svc:9090   # your Prometheus
+        auth_type: basic                                    # none | basic | bearer
+        username: collector
+        secret_env: PROMETHEUS_PASSWORD
+      - id: flexprice
+        type: flexprice
+        url: https://api.cloud.flexprice.io
+        secret_env: FLEXPRICE_API_KEY
+        # headers: { x-environment-id: "${FLEXPRICE_ENV_ID}" }   # self-hosted Flexprice only
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -42,18 +64,24 @@ spec:
           args: ["collector", "serve", "--addr", ":8090"]
           env:
             - { name: COLLECTOR_GIT, value: "true" }
+            - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
+            - { name: COLLECTOR_LOCK_CONNECTIONS, value: "true" }   # UI cannot add or edit connections
             - name: COLLECTOR_UI_TOKEN
               valueFrom: { secretKeyRef: { name: collector-secrets, key: ui-token } }
+            - name: PROMETHEUS_PASSWORD
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+            - name: FLEXPRICE_API_KEY
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
           ports: [{ containerPort: 8090 }]
           readinessProbe: { httpGet: { path: /healthz, port: 8090 } }
           volumeMounts:
             - { name: data, mountPath: /data }
-            - { name: secrets, mountPath: /secrets, readOnly: true }
+            - { name: connections, mountPath: /config, readOnly: true }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: collector-data }
-        - name: secrets
-          secret: { secretName: collector-secrets, defaultMode: 0400 }
+        - name: connections
+          configMap: { name: collector-connections }
 ---
 apiVersion: v1
 kind: Service
@@ -87,11 +115,18 @@ spec:
             - name: collector
               image: ghcr.io/flexprice/bento-collector:latest
               args: ["collector", "run", "--all"]
+              env:
+                - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
+                - { name: COLLECTOR_LOCK_CONNECTIONS, value: "true" }
+                - name: PROMETHEUS_PASSWORD
+                  valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+                - name: FLEXPRICE_API_KEY
+                  valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
               volumeMounts:
                 - { name: data, mountPath: /data, readOnly: true }
-                - { name: secrets, mountPath: /secrets, readOnly: true }
+                - { name: connections, mountPath: /config, readOnly: true }
           volumes:
             - name: data
               persistentVolumeClaim: { claimName: collector-data }
-            - name: secrets
-              secret: { secretName: collector-secrets, defaultMode: 0400 }
+            - name: connections
+              configMap: { name: collector-connections }

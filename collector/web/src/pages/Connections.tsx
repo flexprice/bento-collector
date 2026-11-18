@@ -10,18 +10,22 @@ const blank = (type: Connection['type']): Connection =>
     : { id: '', type, url: '', auth_type: 'none', headers: {} }
 
 export function ConnectionsPage() {
-  const { connections } = useApp()
+  const { connections, connectionsLocked } = useApp()
   const [editing, setEditing] = useState<Connection | null>(null)
+  const anyManaged = connections.some((c) => c.managed)
   return (
     <div>
       <PageHeader
         title="Connections"
-        meta="Where usage is read from and where events are sent. Secrets go to the secret store, never into specs or git."
-        actions={<>
+        meta={anyManaged
+          ? 'Where usage is read from and where events are sent. Connections marked "Managed by deployment" come from the connections file; their secrets are environment variables.'
+          : 'Where usage is read from and where events are sent. Secrets go to the secret store, never into specs or git.'}
+        actions={connectionsLocked ? null : <>
           <Button variant="outline" onClick={() => setEditing(blank('flexprice'))}><ReceiptIcon aria-hidden /> Add Flexprice</Button>
           <Button onClick={() => setEditing(blank('prometheus'))}><DatabaseIcon aria-hidden /> Add Prometheus</Button>
         </>}
       />
+      {connectionsLocked ? <div className="px-8 pb-4"><Alert level="info">Connections are managed by the deployment. To add or change one, edit the connections file and redeploy.</Alert></div> : null}
       <div className="grid gap-4 px-8 pb-10 lg:grid-cols-2">
         {connections.length === 0 ? (
           <Section title="No connections" className="lg:col-span-2" flush>
@@ -46,15 +50,16 @@ function ConnectionCard({ c, onEdit }: { c: Connection; onEdit: () => void }) {
       description={<span className="font-mono">{c.url}</span>}
       actions={<>
         <Button variant="outline" size="sm" onClick={run} disabled={test === 'running'}>{test === 'running' ? <Spinner /> : <PlugZapIcon aria-hidden />} Test</Button>
-        <Button variant="ghost" size="icon" aria-label={`Edit ${c.id}`} onClick={onEdit}><PencilIcon aria-hidden /></Button>
+        {c.managed ? null : <Button variant="ghost" size="icon" aria-label={`Edit ${c.id}`} onClick={onEdit}><PencilIcon aria-hidden /></Button>}
       </>}
     >
       <div className="flex flex-wrap items-center gap-2 text-[13px]">
         <Badge tone="info">{c.type === 'prometheus' ? 'Prometheus · source' : 'Flexprice · destination'}</Badge>
+        {c.managed ? <Badge tone="primary">Managed by deployment</Badge> : null}
         <Badge>{c.auth_type === 'basic' ? `Basic auth · ${c.username}` : c.auth_type === 'bearer' ? 'Bearer token' : c.auth_type === 'api_key' ? 'API key' : 'No auth'}</Badge>
-        {c.secret_ref ? <Badge tone={c.has_secret ? 'success' : 'error'} dot>{c.has_secret ? 'Secret stored' : 'Secret missing'}</Badge> : null}
+        {c.secret_ref ? <Badge tone={c.has_secret ? 'success' : 'error'} dot>{c.secret_ref.startsWith('env:') ? `${c.has_secret ? 'Secret from' : 'Missing'} $${c.secret_ref.slice(4)}` : c.has_secret ? 'Secret stored' : 'Secret missing'}</Badge> : null}
         {Object.keys(c.headers ?? {}).length ? <Badge>{Object.keys(c.headers ?? {}).length} header(s)</Badge> : null}
-        <span className="text-muted-foreground ml-auto text-xs">Updated {relTime(c.updated_at)}</span>
+        {c.managed ? null : <span className="text-muted-foreground ml-auto text-xs">Updated {relTime(c.updated_at)}</span>}
       </div>
       {test && test !== 'running' ? <Alert className="mt-3" level={test.ok ? 'ok' : 'error'}>{test.message}</Alert> : null}
     </Section>

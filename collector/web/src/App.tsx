@@ -8,6 +8,7 @@ import { CollectorEditor } from '@/pages/Editor'
 
 interface Ctx {
   connections: Connection[]
+  connectionsLocked: boolean
   collectors: Collector[]
   reload: () => Promise<void>
   toast: (msg: string, error?: boolean) => void
@@ -29,6 +30,7 @@ function useHash() {
 export function App() {
   const hash = useHash()
   const [connections, setConnections] = useState<Connection[]>([])
+  const [connectionsLocked, setConnectionsLocked] = useState(false)
   const [collectors, setCollectors] = useState<Collector[]>([])
   const [needToken, setNeedToken] = useState(false)
   const [loaded, setLoaded] = useState(false)
@@ -41,8 +43,9 @@ export function App() {
 
   const reload = useCallback(async () => {
     try {
-      const [cs, cols] = await Promise.all([api<Connection[]>('GET', '/api/connections'), api<Collector[]>('GET', '/api/collectors')])
+      const [cs, cols, settings] = await Promise.all([api<Connection[]>('GET', '/api/connections'), api<Collector[]>('GET', '/api/collectors'), api<{ connections_locked: boolean }>('GET', '/api/settings')])
       setConnections(cs)
+      setConnectionsLocked(settings.connections_locked)
       setCollectors(cols)
       setNeedToken(false)
     } catch (e) {
@@ -68,7 +71,7 @@ export function App() {
   }
 
   return (
-    <AppCtx.Provider value={{ connections, collectors, reload, toast, go }}>
+    <AppCtx.Provider value={{ connections, connectionsLocked, collectors, reload, toast, go }}>
       <div className="flex min-h-dvh">
         <aside className="bg-sidebar sticky top-0 flex h-dvh w-60 shrink-0 flex-col border-r">
           <div className="flex h-14 items-center gap-2 border-b px-4">

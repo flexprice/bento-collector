@@ -21,6 +21,8 @@ type Server struct {
 	Store   Store
 	Secrets Secrets
 	Engine  *Engine
+	// ConnectionsLocked: only connections from the deployment's file can be used.
+	ConnectionsLocked bool
 	// Token, when set, is required as "Authorization: Bearer <token>" on /api.
 	Token string
 }
@@ -29,6 +31,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	api := http.NewServeMux()
+	api.HandleFunc("GET /api/settings", s.settings)
 	api.HandleFunc("GET /api/connections", s.listConnections)
 	api.HandleFunc("PUT /api/connections/{id}", s.saveConnection)
 	api.HandleFunc("POST /api/connections/{id}/test", s.testConnection)
@@ -89,6 +92,10 @@ func (s *Server) view(c Connection) connectionView {
 	return connectionView{Connection: c, HasSecret: c.SecretRef != "" && s.Secrets.Has(c.SecretRef)}
 }
 
+func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
+	writeJSONResp(w, http.StatusOK, map[string]bool{"connections_locked": s.ConnectionsLocked})
+}
+
 func (s *Server) listConnections(w http.ResponseWriter, _ *http.Request) {
 	cs, err := s.Store.ListConnections()
 	if err != nil {
@@ -112,12 +119,19 @@ func (s *Server) saveConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	c := body.Connection
 	c.ID = r.PathValue("id")
+	c.Managed = false
 	if c.SecretRef == "" && (body.Secret != "" || c.Type == ConnectionFlexprice || (c.AuthType != "" && c.AuthType != "none")) {
 		c.SecretRef = c.ID
 	}
 	if err := c.Validate(); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	if ms, ok := s.Store.(*ManagedStore); ok {
+		if err := ms.CanSave(c.ID); err != nil {
+			writeErr(w, http.StatusConflict, err)
+			return
+		}
 	}
 	if body.Secret != "" {
 		if err := s.Secrets.Put(c.SecretRef, body.Secret); err != nil {

@@ -44,6 +44,8 @@ type Connection struct {
 	SecretRef string            `json:"secret_ref,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	UpdatedAt time.Time         `json:"updated_at,omitempty"`
+	// Managed connections come from the deployment's connections file and are read-only.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // Collector is one saved recipe: which source to query, when, and how each
@@ -147,7 +149,11 @@ func (c *Connection) Validate() error {
 	if c.Type == ConnectionFlexprice && c.SecretRef == "" {
 		return fmt.Errorf("a Flexprice connection needs an API key secret")
 	}
-	if c.SecretRef != "" {
+	if name, ok := strings.CutPrefix(c.SecretRef, envRefPrefix); ok {
+		if !c.Managed || !envVarName.MatchString(name) {
+			return fmt.Errorf("secret_ref %q: environment secrets are only for connections in the connections file", c.SecretRef)
+		}
+	} else if c.SecretRef != "" {
 		if err := ValidID(c.SecretRef); err != nil {
 			return fmt.Errorf("secret_ref: %w", err)
 		}

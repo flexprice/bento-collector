@@ -5,7 +5,7 @@ connect, write PromQL, map rows to events, preview against live data, save a ver
 One binary and image runs everywhere: next to a private Prometheus (self-hosted) or on Flexprice's ECS (hosted).
 
 ```
- UI ── /api ── spec store (files, optional git)      secret store (files / mounted K8s Secret)
+ UI ── /api ── spec store (files, optional git)      secrets (env vars from the deployment, or files)
                  │                                        │
                  ▼                                        ▼
         collector run --all  ── renders spec → Bento pipeline ── PromQL ──▶ Prometheus
@@ -20,7 +20,7 @@ One binary and image runs everywhere: next to a private Prometheus (self-hosted)
 | `collector run --collector <id> \| --all [--day YYYY-MM-DD] [--from YYYY-MM-DD] [--dry-run]` | Runs one closed UTC day (default yesterday) or a backfill range, prints one JSON result per collector/day |
 | `collector render --collector <id> [--version N] [--day …]` | Prints the full Bento config (secrets as `${ENV}`), runnable with `bento-flexprice -c` |
 
-Common flags: `--data` (`COLLECTOR_DATA_DIR`), `--secrets` (`COLLECTOR_SECRETS_DIR`, default `<data>/../collector-secrets`, must be outside the data dir), `--git` (`COLLECTOR_GIT=true`: commit each save).
+Common flags: `--data` (`COLLECTOR_DATA_DIR`), `--secrets` (`COLLECTOR_SECRETS_DIR`, default `<data>/../collector-secrets`, must be outside the data dir), `--git` (`COLLECTOR_GIT=true`: commit each save), `--connections` (`COLLECTOR_CONNECTIONS_FILE`) and `--lock-connections` (`COLLECTOR_LOCK_CONNECTIONS=true`), see below.
 
 Runs happen when the scheduler starts `run` (the CronJob/ECS schedule); a collector's `trigger.schedule` records the intended time but does not start anything by itself. `collector render` exports use the Flexprice output plugin, which has no custom headers, so `x-environment-id` is not carried over (use an environment-scoped API key).
 
@@ -36,6 +36,35 @@ Runs happen when the scheduler starts `run` (the CronJob/ECS schedule); a collec
 
 Preview (UI) runs steps 1–4 against live Prometheus and sends nothing.
 
+## Connections owned by the deployment
+
+For a real deployment, keep connections and credentials with your infrastructure instead of the UI.
+The UI then only manages collectors (queries, mapping, tenants) and shows these connections read-only
+as "Managed by deployment"; Test still works.
+
+```yaml
+# connections.yaml (e.g. a ConfigMap), passed as COLLECTOR_CONNECTIONS_FILE
+connections:
+  - id: prometheus
+    type: prometheus
+    url: ${PROMETHEUS_URL}             # ${VAR} is read from the environment
+    auth_type: basic                   # none | basic | bearer
+    username: collector
+    secret_env: PROMETHEUS_PASSWORD    # password/token: the name of an env var, never the value
+  - id: flexprice
+    type: flexprice
+    url: https://api.cloud.flexprice.io
+    secret_env: FLEXPRICE_API_KEY
+    headers: { x-environment-id: "${FLEXPRICE_ENV_ID}" }   # self-hosted Flexprice only
+```
+
+- Give `serve` and the scheduled `run` the same file and env vars (from your Kubernetes Secret, which External Secrets Operator can sync from AWS/GCP Secrets Manager or Vault).
+- Startup fails and lists every variable that is not set, so a missing credential is found at deploy time, not at the first run.
+- `COLLECTOR_LOCK_CONNECTIONS=true` hides and refuses connections created in the UI. Without it, UI connections (with secrets in the secret store) can be added next to the managed ones, which is handy for local trials.
+- Collectors refer to connections by `id`, so the same saved collectors work against staging and production deployments with different files.
+- Only connections in this file can read environment variables; a connection created in the UI cannot point `secret_ref` at one.
+- `collector render` writes these secrets as `${PROMETHEUS_PASSWORD}` / `${FLEXPRICE_API_KEY}` (the `secret_env` names).
+
 ## Storage
 
 ```
@@ -50,7 +79,7 @@ With `--git`, the data dir is a git repo and every save is a commit, which gives
 
 | Mode | How |
 |---|---|
-| Kubernetes, next to Prometheus | [deploy/kubernetes/collector.yaml](../../deploy/kubernetes/collector.yaml): UI Deployment + daily CronJob (`run --all`) + PVC + Secret |
+| Kubernetes, next to Prometheus | [deploy/kubernetes/collector.yaml](../../deploy/kubernetes/collector.yaml): connections ConfigMap, UI Deployment + daily CronJob (`run --all`) + PVC; credentials from your Secret as env vars |
 | One machine | [deploy/docker-compose/docker-compose.yml](../../deploy/docker-compose/docker-compose.yml), then `docker compose run --rm collector-ui collector run --all` from cron |
 | Flexprice-hosted (ECS) | Same image: an ECS service runs `collector serve` (internal only), an EventBridge-scheduled task runs `collector run --all`; both mount the same EFS volume at `/data`, secrets from Secrets Manager as files under `/secrets`. Needs network access to the customer's Prometheus |
 

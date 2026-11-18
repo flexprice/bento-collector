@@ -57,18 +57,22 @@ func Main(args []string, stdout, stderr io.Writer) int {
 }
 
 type commonFlags struct {
-	data    string
-	secrets string
-	git     bool
+	data        string
+	secrets     string
+	git         bool
+	connections string
+	lock        bool
 }
 
 func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.data, "data", envOr("COLLECTOR_DATA_DIR", "./collector-data"), "directory holding connections and collector specs [COLLECTOR_DATA_DIR]")
 	fs.StringVar(&c.secrets, "secrets", os.Getenv("COLLECTOR_SECRETS_DIR"), "directory with one file per secret, e.g. a mounted Kubernetes Secret (default <data>/../collector-secrets) [COLLECTOR_SECRETS_DIR]")
 	fs.BoolVar(&c.git, "git", os.Getenv("COLLECTOR_GIT") == "true", "commit every save to a git repository in the data directory [COLLECTOR_GIT]")
+	fs.StringVar(&c.connections, "connections", os.Getenv("COLLECTOR_CONNECTIONS_FILE"), "YAML file of connections owned by the deployment; values may use ${ENV}, secrets come from secret_env [COLLECTOR_CONNECTIONS_FILE]")
+	fs.BoolVar(&c.lock, "lock-connections", os.Getenv("COLLECTOR_LOCK_CONNECTIONS") == "true", "only allow connections from --connections; the UI cannot add or edit any [COLLECTOR_LOCK_CONNECTIONS]")
 }
 
-func (c *commonFlags) open() (*FileStore, FileSecrets, error) {
+func (c *commonFlags) open() (Store, Secrets, string, error) {
 	secrets := c.secrets
 	if secrets == "" {
 		secrets = filepath.Join(filepath.Dir(filepath.Clean(c.data)), "collector-secrets")
@@ -76,10 +80,24 @@ func (c *commonFlags) open() (*FileStore, FileSecrets, error) {
 	absData, _ := filepath.Abs(c.data)
 	absSecrets, _ := filepath.Abs(secrets)
 	if rel, err := filepath.Rel(absData, absSecrets); err == nil && !strings.HasPrefix(rel, "..") {
-		return nil, FileSecrets{}, errors.New("the secrets directory must not be inside the data directory, which may be committed to git")
+		return nil, nil, "", errors.New("the secrets directory must not be inside the data directory, which may be committed to git")
 	}
-	store, err := NewFileStore(c.data, c.git)
-	return store, FileSecrets{Dir: secrets}, err
+	if c.lock && c.connections == "" {
+		return nil, nil, "", errors.New("--lock-connections needs --connections (COLLECTOR_CONNECTIONS_FILE)")
+	}
+	files, err := NewFileStore(c.data, c.git)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	var store Store = files
+	if c.connections != "" {
+		managed, err := LoadConnections(c.connections, os.Getenv)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		store = NewManagedStore(files, managed, c.lock)
+	}
+	return store, EnvSecrets{Next: FileSecrets{Dir: secrets}, Getenv: os.Getenv}, secrets, nil
 }
 
 func serve(args []string, stderr io.Writer) error {
@@ -90,12 +108,12 @@ func serve(args []string, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, secrets, err := c.open()
+	store, secrets, secretsDir, err := c.open()
 	if err != nil {
 		return err
 	}
 	token := os.Getenv("COLLECTOR_UI_TOKEN")
-	srv := &Server{Store: store, Secrets: secrets, Engine: NewEngine(store, secrets), Token: token}
+	srv := &Server{Store: store, Secrets: secrets, Engine: NewEngine(store, secrets), Token: token, ConnectionsLocked: c.lock}
 	hs := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -112,7 +130,7 @@ func serve(args []string, stderr io.Writer) error {
 		}
 		fmt.Fprintln(stderr, "warning: COLLECTOR_UI_TOKEN is not set; the UI and API are open on", *addr)
 	}
-	fmt.Fprintf(stderr, "collector UI listening on %s (data %s, secrets %s)\n", *addr, c.data, secrets.Dir)
+	fmt.Fprintf(stderr, "collector UI listening on %s (data %s, secrets %s)\n", *addr, c.data, secretsDir)
 	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -139,7 +157,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := fs.Parse(args); err != nil {
 		return 2, err
 	}
-	store, secrets, err := c.open()
+	store, secrets, _, err := c.open()
 	if err != nil {
 		return 1, err
 	}
@@ -211,7 +229,7 @@ func renderCmd(args []string, stdout io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	store, secrets, err := c.open()
+	store, secrets, _, err := c.open()
 	if err != nil {
 		return err
 	}

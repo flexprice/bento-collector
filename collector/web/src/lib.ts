@@ -15,6 +15,7 @@ export interface Connection {
   updated_at?: string
   has_secret?: boolean
   secret?: string
+  managed?: boolean
 }
 
 export interface Collector {
