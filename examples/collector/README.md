@@ -97,9 +97,13 @@ With `--git`, the data dir is a git repo and every save is a commit, which gives
 **One command** (Prometheus with the sandbox data plus the collector UI built from this repo):
 
 ```bash
-FLEXPRICE_API_KEY=… docker compose -f examples/collector/syncron-sandbox/docker-compose.yml up -d --build
+export FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=…   # every compose command below needs them
+python3 examples/collector/syncron-sandbox/flexprice_setup.py   # Syncron customers and meters
+docker compose -f examples/collector/syncron-sandbox/docker-compose.yml up -d --build
 # UI: http://localhost:8090, token syncron-ui-token. Connections come from syncron-sandbox/connections.yaml:
-# Prometheus http://prometheus:9090 (basic auth), Flexprice $FLEXPRICE_URL (default http://host.docker.internal:8080)
+# Prometheus http://prometheus:9090 (basic auth), Flexprice $FLEXPRICE_URL (default http://host.docker.internal:8080).
+# Create and save at least one collector in the UI (e.g. CPU core-hours); a fresh sandbox has none,
+# so `run --all` would exit with "nothing to run".
 docker compose -f examples/collector/syncron-sandbox/docker-compose.yml run --rm --no-deps collector collector run --all
 ```
 
