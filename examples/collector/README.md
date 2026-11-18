@@ -69,3 +69,16 @@ COLLECTOR_UI_TOKEN=dev COLLECTOR_DATA_DIR=./collector-data BENTO_FLEXPRICE=./ben
 ## Not in this version
 
 Run history screen, cursor and missed-day alert (use the scheduler's job-failure alert), approvals, collector-token config pull, writing secrets to Kubernetes/Secrets Manager from the UI, sources other than Prometheus.
+
+## Developing the UI
+
+The UI source is a React + Tailwind app in `collector/web`, built from the FlexPrice console's Base UI primitives and ReUI components (`src/components/primitives`, `src/components/reui`, vendored from `flexprice/portal`). The build output in `collector/ui` is committed and embedded into the Go binary, so a plain `go build` needs no Node.
+
+```bash
+cd collector/web
+npm ci
+npm run dev      # Vite dev server; proxies /api to 127.0.0.1:8090
+npm run build    # typecheck, then write collector/ui
+```
+
+Rebuild and commit `collector/ui` after changing anything in `collector/web`.
