@@ -25,14 +25,14 @@ import (
 )
 
 type Engine struct {
-	Store   store.Store
-	Secrets store.Secrets
-	HTTP    *http.Client
-	Now     func() time.Time
+	Store       store.Store
+	Connections *store.Connections
+	HTTP        *http.Client
+	Now         func() time.Time
 }
 
-func NewEngine(store store.Store, secrets store.Secrets) *Engine {
-	return &Engine{Store: store, Secrets: secrets, HTTP: &http.Client{Timeout: 60 * time.Second}, Now: time.Now}
+func NewEngine(st store.Store, conns *store.Connections) *Engine {
+	return &Engine{Store: st, Connections: conns, HTTP: &http.Client{Timeout: 60 * time.Second}, Now: time.Now}
 }
 
 type Row struct {
@@ -98,10 +98,10 @@ func (r *Result) blocked() bool {
 func (e *Engine) Resolve(c spec.Collector, w spec.Window, withSecrets bool) (render.RenderInput, error) {
 	in := render.RenderInput{Collector: c, Window: w, QueryTime: e.Now()}
 	var err error
-	if in.Source, err = e.Store.GetConnection(c.Source.Connection); err != nil {
+	if in.Source, err = e.Connections.Get(c.Source.Connection); err != nil {
 		return in, fmt.Errorf("source connection: %w", err)
 	}
-	if in.Destination, err = e.Store.GetConnection(c.Destination); err != nil {
+	if in.Destination, err = e.Connections.Get(c.Destination); err != nil {
 		return in, fmt.Errorf("destination connection: %w", err)
 	}
 	if in.Destination.Type != spec.ConnectionFlexprice {
@@ -110,12 +110,10 @@ func (e *Engine) Resolve(c spec.Collector, w spec.Window, withSecrets bool) (ren
 	if !withSecrets {
 		return in, nil
 	}
-	if in.Source.SecretRef != "" {
-		if in.Credentials.SourceSecret, err = e.Secrets.Get(in.Source.SecretRef); err != nil {
-			return in, err
-		}
+	if in.Credentials.SourceSecret, err = e.Connections.Secret(in.Source); err != nil {
+		return in, err
 	}
-	in.Credentials.DestinationSecret, err = e.Secrets.Get(in.Destination.SecretRef)
+	in.Credentials.DestinationSecret, err = e.Connections.Secret(in.Destination)
 	return in, err
 }
 

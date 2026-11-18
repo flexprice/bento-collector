@@ -63,10 +63,10 @@ COPY --from=builder --chown=bento:bento /build/examples /app/examples
 # internal/ holds prod pipelines referenced via -c /app/internal/...
 COPY --from=builder --chown=bento:bento /build/internal /app/internal
 
-# Collector UI state: specs/connections in /data (optionally a git repo),
-# secrets in /secrets (one file per key, e.g. a mounted Kubernetes Secret).
-RUN mkdir -p /data /secrets && chown bento:bento /data /secrets && chmod 700 /secrets
-ENV COLLECTOR_DATA_DIR=/data COLLECTOR_SECRETS_DIR=/secrets
+# Collector UI: versioned specs in /data (optionally a git repo). Connections come
+# from COLLECTOR_CONNECTIONS_FILE and secrets from environment variables.
+RUN mkdir -p /data && chown bento:bento /data
+ENV COLLECTOR_DATA_DIR=/data
 
 # Switch to non-root user
 USER bento

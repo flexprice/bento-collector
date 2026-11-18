@@ -1,5 +1,5 @@
-// Package store keeps versioned collector specs and connections (files, optional git)
-// and resolves secrets from files or, for deployment-managed connections, the environment.
+// Package store keeps versioned collector specs (files, optional git) and the
+// deployment's connections file.
 package store
 
 import (
@@ -20,20 +20,16 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
-// Store keeps connections and versioned collector specs.
+// Store keeps versioned collector specs.
 type Store interface {
-	ListConnections() ([]spec.Connection, error)
-	GetConnection(id string) (spec.Connection, error)
-	SaveConnection(c spec.Connection) (spec.Connection, error)
 	ListCollectors() ([]spec.Collector, error)
 	GetCollector(id string, version int) (spec.Collector, error)
 	ListVersions(id string) ([]spec.Collector, error)
 	SaveCollector(c spec.Collector) (spec.Collector, error)
 }
 
-// FileStore writes one JSON file per connection and per collector version:
+// FileStore writes one JSON file per collector version:
 //
-//	connections/<id>.json
 //	collectors/<id>/v0001.json
 //
 // With Git set, every save is committed so the directory doubles as an audit log.
@@ -45,10 +41,8 @@ type FileStore struct {
 }
 
 func NewFileStore(dir string, git bool) (*FileStore, error) {
-	for _, sub := range []string{"connections", "collectors"} {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
-			return nil, err
-		}
+	if err := os.MkdirAll(filepath.Join(dir, "collectors"), 0o755); err != nil {
+		return nil, err
 	}
 	s := &FileStore{Dir: dir, Git: git, Now: time.Now}
 	if git {
@@ -59,46 +53,6 @@ func NewFileStore(dir string, git bool) (*FileStore, error) {
 		}
 	}
 	return s, nil
-}
-
-func (s *FileStore) ListConnections() ([]spec.Connection, error) {
-	files, err := filepath.Glob(filepath.Join(s.Dir, "connections", "*.json"))
-	if err != nil {
-		return nil, err
-	}
-	out := make([]spec.Connection, 0, len(files))
-	for _, f := range files {
-		var c spec.Connection
-		if err := readJSON(f, &c); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
-}
-
-func (s *FileStore) GetConnection(id string) (spec.Connection, error) {
-	var c spec.Connection
-	if err := spec.ValidID(id); err != nil {
-		return c, err
-	}
-	err := readJSON(filepath.Join(s.Dir, "connections", id+".json"), &c)
-	return c, err
-}
-
-func (s *FileStore) SaveConnection(c spec.Connection) (spec.Connection, error) {
-	if err := c.Validate(); err != nil {
-		return c, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c.UpdatedAt = s.Now().UTC()
-	path := filepath.Join(s.Dir, "connections", c.ID+".json")
-	if err := writeJSON(path, c); err != nil {
-		return c, err
-	}
-	return c, s.commit(path, "connection "+c.ID)
 }
 
 func (s *FileStore) ListCollectors() ([]spec.Collector, error) {

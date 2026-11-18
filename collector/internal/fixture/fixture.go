@@ -27,8 +27,17 @@ func CPUCollector() spec.Collector {
 	return c
 }
 
-// Connections returns a bearer-auth Prometheus and a Flexprice connection.
+// Connections returns a bearer-auth Prometheus and a Flexprice connection,
+// with secrets in PROMETHEUS_TOKEN and FLEXPRICE_API_KEY.
 func Connections(promURL, fpURL string) (spec.Connection, spec.Connection) {
-	return spec.Connection{ID: "prom", Type: spec.ConnectionPrometheus, URL: promURL, AuthType: "bearer", SecretRef: "prom"},
-		spec.Connection{ID: "fp", Type: spec.ConnectionFlexprice, URL: fpURL, AuthType: "api_key", SecretRef: "fp"}
+	return spec.Connection{ID: "prom", Type: spec.ConnectionPrometheus, URL: promURL, AuthType: "bearer", SecretEnv: "PROMETHEUS_TOKEN"},
+		spec.Connection{ID: "fp", Type: spec.ConnectionFlexprice, URL: fpURL, AuthType: "api_key", SecretEnv: "FLEXPRICE_API_KEY"}
+}
+
+// ConnectionsFile is a connections file for the two connections above.
+func ConnectionsFile(promURL, fpURL string) string {
+	return `connections:
+  - { id: prom, type: prometheus, url: "` + promURL + `", auth_type: bearer, secret_env: PROMETHEUS_TOKEN }
+  - { id: fp, type: flexprice, url: "` + fpURL + `", secret_env: FLEXPRICE_API_KEY }
+`
 }

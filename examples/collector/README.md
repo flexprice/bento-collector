@@ -5,7 +5,7 @@ connect, write PromQL, map rows to events, preview against live data, save a ver
 One binary and image runs everywhere: next to a private Prometheus (self-hosted) or on Flexprice's ECS (hosted).
 
 ```
- UI ── /api ── spec store (files, optional git)      secrets (env vars from the deployment, or files)
+ UI ── /api ── spec store (files, optional git)      connections file + secrets as env vars (from the deployment)
                  │                                        │
                  ▼                                        ▼
         collector run --all  ── renders spec → Bento pipeline ── PromQL ──▶ Prometheus
@@ -20,7 +20,7 @@ One binary and image runs everywhere: next to a private Prometheus (self-hosted)
 | `collector run --collector <id> \| --all [--day YYYY-MM-DD] [--from YYYY-MM-DD] [--dry-run]` | Runs one closed UTC day (default yesterday) or a backfill range, prints one JSON result per collector/day |
 | `collector render --collector <id> [--version N] [--day …]` | Prints the full Bento config (secrets as `${ENV}`), runnable with `bento-flexprice -c` |
 
-Common flags: `--data` (`COLLECTOR_DATA_DIR`), `--secrets` (`COLLECTOR_SECRETS_DIR`, default `<data>/../collector-secrets`, must be outside the data dir), `--git` (`COLLECTOR_GIT=true`: commit each save), `--connections` (`COLLECTOR_CONNECTIONS_FILE`) and `--lock-connections` (`COLLECTOR_LOCK_CONNECTIONS=true`), see below.
+Common flags: `--connections` (`COLLECTOR_CONNECTIONS_FILE`, required, see below), `--data` (`COLLECTOR_DATA_DIR`) and `--git` (`COLLECTOR_GIT=true`: commit each save).
 
 Runs happen when the scheduler starts `run` (the CronJob/ECS schedule); a collector's `trigger.schedule` records the intended time but does not start anything by itself. `collector render` exports use the Flexprice output plugin, which has no custom headers, so `x-environment-id` is not carried over (use an environment-scoped API key).
 
@@ -36,11 +36,10 @@ Runs happen when the scheduler starts `run` (the CronJob/ECS schedule); a collec
 
 Preview (UI) runs steps 1–4 against live Prometheus and sends nothing.
 
-## Connections owned by the deployment
+## Connections
 
-For a real deployment, keep connections and credentials with your infrastructure instead of the UI.
-The UI then only manages collectors (queries, mapping, tenants) and shows these connections read-only
-as "Managed by deployment"; Test still works.
+Connections and credentials are owned by the deployment, not the UI. The UI only manages collectors
+(queries, mapping, tenants) and lists the connections read-only; Test still works.
 
 ```yaml
 # connections.yaml (e.g. a ConfigMap), passed as COLLECTOR_CONNECTIONS_FILE
@@ -60,17 +59,14 @@ connections:
 
 - Give `serve` and the scheduled `run` the same file and env vars (from your Kubernetes Secret, which External Secrets Operator can sync from AWS/GCP Secrets Manager or Vault).
 - Startup fails and lists every variable that is not set, so a missing credential is found at deploy time, not at the first run.
-- `COLLECTOR_LOCK_CONNECTIONS=true` hides and refuses connections created in the UI. Without it, UI connections (with secrets in the secret store) can be added next to the managed ones, which is handy for local trials.
-- Collectors refer to connections by `id`, so the same saved collectors work against staging and production deployments with different files.
-- Only connections in this file can read environment variables; a connection created in the UI cannot point `secret_ref` at one.
+- Collectors refer to connections by `id`. List several (e.g. `flexprice-sandbox` and `flexprice-prod`, each with its own `secret_env`) to choose per collector, or give each environment's deployment its own file with the same ids so saved collectors move between them unchanged.
+- To add or change a connection, edit the file and redeploy.
 - `collector render` writes these secrets as `${PROMETHEUS_PASSWORD}` / `${FLEXPRICE_API_KEY}` (the `secret_env` names).
 
 ## Storage
 
 ```
-<data>/connections/<id>.json          url, auth type, secret_ref (never the secret)
 <data>/collectors/<id>/v0001.json     immutable versions; runs use the latest
-<secrets>/<secret_ref>                one file per secret (0600), or a mounted Kubernetes Secret
 ```
 
 With `--git`, the data dir is a git repo and every save is a commit, which gives history and an audit log.
@@ -85,7 +81,7 @@ With `--git`, the data dir is a git repo and every save is a commit, which gives
 
 ## Not in this version
 
-Run history screen, cursor and missed-day alert (use the scheduler's job-failure alert), approvals, collector-token config pull, writing secrets to Kubernetes/Secrets Manager from the UI, sources other than Prometheus.
+Run history screen, cursor and missed-day alert (use the scheduler's job-failure alert), approvals, collector-token config pull, managing connections or secrets in the UI, sources other than Prometheus.
 
 ## Code layout
 
@@ -93,7 +89,7 @@ Run history screen, cursor and missed-day alert (use the scheduler's job-failure
 collector/
   cli.go      serve / run / render commands (called from main.go)
   spec/       Collector, Connection, Window types and validation
-  store/      FileStore (versions, git), file and env secrets, deployment-managed connections
+  store/      FileStore (versions, git) and the connections file
   render/     spec → Bento pipeline config (golden test in testdata/)
   engine/     preview and run: completeness, in-process Bento pipeline, Flexprice checks, send
   server/     HTTP API, auth, embedded UI

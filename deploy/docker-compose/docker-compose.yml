@@ -13,7 +13,6 @@ services:
     environment:
       COLLECTOR_GIT: "true"
       COLLECTOR_CONNECTIONS_FILE: /config/connections.yaml
-      COLLECTOR_LOCK_CONNECTIONS: "true"
       COLLECTOR_UI_TOKEN: ${COLLECTOR_UI_TOKEN:?set COLLECTOR_UI_TOKEN}
     ports: ["127.0.0.1:8090:8090"]
     volumes:

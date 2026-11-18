@@ -20,11 +20,8 @@ import (
 
 // Server is the control-plane API plus the embedded UI.
 type Server struct {
-	Store   store.Store
-	Secrets store.Secrets
-	Engine  *engine.Engine
-	// ConnectionsLocked: only connections from the deployment's file can be used.
-	ConnectionsLocked bool
+	Store  store.Store
+	Engine *engine.Engine
 	// Token, when set, is required as "Authorization: Bearer <token>" on /api.
 	Token string
 }
@@ -33,9 +30,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	api := http.NewServeMux()
-	api.HandleFunc("GET /api/settings", s.settings)
 	api.HandleFunc("GET /api/connections", s.listConnections)
-	api.HandleFunc("PUT /api/connections/{id}", s.saveConnection)
 	api.HandleFunc("POST /api/connections/{id}/test", s.testConnection)
 	api.HandleFunc("GET /api/collectors", s.listCollectors)
 	api.HandleFunc("GET /api/collectors/{id}", s.getCollector)
@@ -84,83 +79,20 @@ func (s *Server) auth(next http.Handler) http.Handler {
 	})
 }
 
-// connectionView never exposes the secret value, only whether it is set.
-type connectionView struct {
-	spec.Connection
-	HasSecret bool `json:"has_secret"`
-}
-
-func (s *Server) view(c spec.Connection) connectionView {
-	return connectionView{Connection: c, HasSecret: c.SecretRef != "" && s.Secrets.Has(c.SecretRef)}
-}
-
-func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
-	writeJSONResp(w, http.StatusOK, map[string]bool{"connections_locked": s.ConnectionsLocked})
-}
-
 func (s *Server) listConnections(w http.ResponseWriter, _ *http.Request) {
-	cs, err := s.Store.ListConnections()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	out := make([]connectionView, len(cs))
-	for i, c := range cs {
-		out[i] = s.view(c)
-	}
-	writeJSONResp(w, http.StatusOK, out)
-}
-
-func (s *Server) saveConnection(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		spec.Connection
-		Secret string `json:"secret"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	c := body.Connection
-	c.ID = r.PathValue("id")
-	c.Managed = false
-	if c.SecretRef == "" && (body.Secret != "" || c.Type == spec.ConnectionFlexprice || (c.AuthType != "" && c.AuthType != "none")) {
-		c.SecretRef = c.ID
-	}
-	if err := c.Validate(); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	if ms, ok := s.Store.(*store.ManagedStore); ok {
-		if err := ms.CanSave(c.ID); err != nil {
-			writeErr(w, http.StatusConflict, err)
-			return
-		}
-	}
-	if body.Secret != "" {
-		if err := s.Secrets.Put(c.SecretRef, body.Secret); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
-	}
-	saved, err := s.Store.SaveConnection(c)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSONResp(w, http.StatusOK, s.view(saved))
+	writeJSONResp(w, http.StatusOK, s.Engine.Connections.List())
 }
 
 func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
-	c, err := s.Store.GetConnection(r.PathValue("id"))
+	c, err := s.Engine.Connections.Get(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	secret := ""
-	if c.SecretRef != "" {
-		if secret, err = s.Secrets.Get(c.SecretRef); err != nil {
-			writeJSONResp(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
-			return
-		}
+	secret, err := s.Engine.Connections.Secret(c)
+	if err != nil {
+		writeJSONResp(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
+		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()

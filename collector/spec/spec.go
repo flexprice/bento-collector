@@ -24,10 +24,6 @@ const (
 	TimestampWindowEnd   = "window_end"
 
 	UsageDatePlaceholder = "__USAGE_DATE__"
-
-	// EnvSecretPrefix marks a secret_ref read from an environment variable
-	// (only connections provisioned by the deployment may use it).
-	EnvSecretPrefix = "env:"
 )
 
 var EnvVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -37,20 +33,17 @@ var (
 	sensitiveHeader = regexp.MustCompile(`(?i)(authorization|cookie|token|secret|password|api[-_]?key|credential)`)
 )
 
-// Connection is a source or destination the collector talks to. Secret values
-// never live here, only a reference to the secret store.
+// Connection is a source or destination from the deployment's connections file.
+// The secret is never stored, only the environment variable that holds it.
 type Connection struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name,omitempty"`
-	Type      string            `json:"type"`
-	URL       string            `json:"url"`
-	AuthType  string            `json:"auth_type,omitempty"`
-	Username  string            `json:"username,omitempty"`
-	SecretRef string            `json:"secret_ref,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	UpdatedAt time.Time         `json:"updated_at,omitempty"`
-	// Managed connections come from the deployment's connections file and are read-only.
-	Managed bool `json:"managed,omitempty"`
+	ID        string            `json:"id" yaml:"id"`
+	Name      string            `json:"name,omitempty" yaml:"name"`
+	Type      string            `json:"type" yaml:"type"`
+	URL       string            `json:"url" yaml:"url"`
+	AuthType  string            `json:"auth_type,omitempty" yaml:"auth_type"`
+	Username  string            `json:"username,omitempty" yaml:"username"`
+	SecretEnv string            `json:"secret_env,omitempty" yaml:"secret_env"`
+	Headers   map[string]string `json:"headers,omitempty" yaml:"headers"`
 }
 
 // Collector is one saved recipe: which source to query, when, and how each
@@ -136,32 +129,26 @@ func (c *Connection) Validate() error {
 		if c.AuthType == "api_key" && c.Type != ConnectionFlexprice {
 			return fmt.Errorf("auth api_key is only for Flexprice connections; use bearer or basic")
 		}
-		if c.SecretRef == "" {
-			return fmt.Errorf("auth %q needs a secret", c.AuthType)
+		if c.SecretEnv == "" {
+			return fmt.Errorf("auth %q needs secret_env", c.AuthType)
 		}
 	case "basic":
-		if c.Username == "" || c.SecretRef == "" {
-			return fmt.Errorf("basic auth needs a username and a secret")
+		if c.Username == "" || c.SecretEnv == "" {
+			return fmt.Errorf("basic auth needs a username and secret_env")
 		}
 	default:
 		return fmt.Errorf("unknown auth_type %q", c.AuthType)
 	}
 	for k := range c.Headers {
 		if sensitiveHeader.MatchString(k) {
-			return fmt.Errorf("header %q looks like a credential; use the connection's auth and secret instead, headers are stored in plain text", k)
+			return fmt.Errorf("header %q looks like a credential; use auth_type and secret_env instead, headers are plain text", k)
 		}
 	}
-	if c.Type == ConnectionFlexprice && c.SecretRef == "" {
-		return fmt.Errorf("a Flexprice connection needs an API key secret")
+	if c.Type == ConnectionFlexprice && c.SecretEnv == "" {
+		return fmt.Errorf("a Flexprice connection needs secret_env for its API key")
 	}
-	if name, ok := strings.CutPrefix(c.SecretRef, EnvSecretPrefix); ok {
-		if !c.Managed || !EnvVarName.MatchString(name) {
-			return fmt.Errorf("secret_ref %q: environment secrets are only for connections in the connections file", c.SecretRef)
-		}
-	} else if c.SecretRef != "" {
-		if err := ValidID(c.SecretRef); err != nil {
-			return fmt.Errorf("secret_ref: %w", err)
-		}
+	if c.SecretEnv != "" && !EnvVarName.MatchString(c.SecretEnv) {
+		return fmt.Errorf("secret_env %q is not an environment variable name", c.SecretEnv)
 	}
 	return nil
 }

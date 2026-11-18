@@ -10,12 +10,8 @@ export interface Connection {
   url: string
   auth_type?: string
   username?: string
-  secret_ref?: string
+  secret_env?: string
   headers?: Record<string, string>
-  updated_at?: string
-  has_secret?: boolean
-  secret?: string
-  managed?: boolean
 }
 
 export interface Collector {

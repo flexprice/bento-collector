@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/flexprice/bento-collector/collector/internal/fixture"
 )
+
+var testSecrets = map[string]string{"PROMETHEUS_TOKEN": "prom-token", "FLEXPRICE_API_KEY": "fp-key"}
 
 type fakeFlexprice struct {
 	mu        sync.Mutex
@@ -86,20 +89,19 @@ func newTestEngine(t *testing.T, promURL, fpURL string) (*Engine, spec.Collector
 	if err != nil {
 		t.Fatal(err)
 	}
-	secrets := store.FileSecrets{Dir: filepath.Join(dir, "secrets")}
-	secrets.Put("prom", "prom-token")
-	secrets.Put("fp", "fp-key")
-	src, dst := fixture.Connections(promURL, fpURL)
-	for _, c := range []spec.Connection{src, dst} {
-		if _, err := st.SaveConnection(c); err != nil {
-			t.Fatal(err)
-		}
+	file := filepath.Join(dir, "connections.yaml")
+	if err := os.WriteFile(file, []byte(fixture.ConnectionsFile(promURL, fpURL)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conns, err := store.LoadConnections(file, func(k string) string { return testSecrets[k] })
+	if err != nil {
+		t.Fatal(err)
 	}
 	c, err := st.SaveCollector(fixture.CPUCollector())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewEngine(st, secrets), c
+	return NewEngine(st, conns), c
 }
 
 const threeTenants = `[
@@ -206,8 +208,9 @@ func TestRunScenarios(t *testing.T) {
 		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "1", threeTenants)
 		defer fps.Close()
 		defer prom.Close()
+		testSecrets["PROMETHEUS_TOKEN"] = "wrong"
+		defer func() { testSecrets["PROMETHEUS_TOKEN"] = "prom-token" }()
 		e, c := newTestEngine(t, prom.URL, fps.URL)
-		e.Secrets.Put("prom", "wrong")
 		res, err := e.Run(context.Background(), c, day, false)
 		if err != nil {
 			t.Fatal(err)

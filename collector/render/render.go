@@ -79,7 +79,7 @@ func render(in RenderInput, withOutput bool) (string, error) {
 		httpProc["basic_auth"] = map[string]any{
 			"enabled":  true,
 			"username": in.Source.Username,
-			"password": secretOr(in.Credentials.SourceSecret, secretEnv(in.Source.SecretRef, "PROMETHEUS_PASSWORD")),
+			"password": secretOr(in.Credentials.SourceSecret, secretEnv(in.Source, "PROMETHEUS_PASSWORD")),
 		}
 	}
 
@@ -124,7 +124,7 @@ func render(in RenderInput, withOutput bool) (string, error) {
 			map[string]any{"output": map[string]any{"flexprice": map[string]any{
 				"api_host": u.Host,
 				"scheme":   u.Scheme,
-				"api_key":  secretOr(in.Credentials.DestinationSecret, secretEnv(in.Destination.SecretRef, "FLEXPRICE_API_KEY")),
+				"api_key":  secretOr(in.Credentials.DestinationSecret, secretEnv(in.Destination, "FLEXPRICE_API_KEY")),
 				"batching": map[string]any{"count": 1000, "period": "1s"},
 			}}},
 		}}}
@@ -146,7 +146,7 @@ func sourceHeaders(in RenderInput) map[string]any {
 		h[k] = v
 	}
 	if in.Source.AuthType == "bearer" {
-		h["Authorization"] = "Bearer " + secretOr(in.Credentials.SourceSecret, secretEnv(in.Source.SecretRef, "PROMETHEUS_TOKEN"))
+		h["Authorization"] = "Bearer " + secretOr(in.Credentials.SourceSecret, secretEnv(in.Source, "PROMETHEUS_TOKEN"))
 	}
 	return h
 }
@@ -160,9 +160,9 @@ func secretOr(v, env string) string {
 
 // secretEnv is the variable an exported config reads a secret from: the
 // connection's own secret_env when it has one.
-func secretEnv(ref, fallback string) string {
-	if name, ok := strings.CutPrefix(ref, spec.EnvSecretPrefix); ok {
-		return name
+func secretEnv(c spec.Connection, fallback string) string {
+	if c.SecretEnv != "" {
+		return c.SecretEnv
 	}
 	return fallback
 }

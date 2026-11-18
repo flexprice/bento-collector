@@ -65,7 +65,6 @@ spec:
           env:
             - { name: COLLECTOR_GIT, value: "true" }
             - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
-            - { name: COLLECTOR_LOCK_CONNECTIONS, value: "true" }   # UI cannot add or edit connections
             - name: COLLECTOR_UI_TOKEN
               valueFrom: { secretKeyRef: { name: collector-secrets, key: ui-token } }
             - name: PROMETHEUS_PASSWORD
@@ -117,7 +116,6 @@ spec:
               args: ["collector", "run", "--all"]
               env:
                 - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
-                - { name: COLLECTOR_LOCK_CONNECTIONS, value: "true" }
                 - name: PROMETHEUS_PASSWORD
                   valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
                 - name: FLEXPRICE_API_KEY
