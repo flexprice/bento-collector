@@ -1,0 +1,18 @@
+# Try the collector UI on one machine. Secrets entered in the UI are written to
+# the collector-secrets volume. Run a day by hand (or from cron):
+#   docker compose run --rm collector-ui collector run --all
+#   docker compose run --rm collector-ui collector run --collector <id> --from 2026-11-01 --day 2026-11-07
+services:
+  collector-ui:
+    image: ghcr.io/flexprice/bento-collector:latest
+    command: ["collector", "serve", "--addr", ":8090"]
+    environment:
+      COLLECTOR_GIT: "true"
+      COLLECTOR_UI_TOKEN: ${COLLECTOR_UI_TOKEN:?set COLLECTOR_UI_TOKEN}
+    ports: ["127.0.0.1:8090:8090"]
+    volumes:
+      - collector-data:/data
+      - collector-secrets:/secrets
+volumes:
+  collector-data:
+  collector-secrets:

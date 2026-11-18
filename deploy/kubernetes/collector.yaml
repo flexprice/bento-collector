@@ -1,0 +1,97 @@
+# Self-hosted collector next to Prometheus: the UI/API (Deployment) and a daily
+# run of every saved collector (CronJob). Both share the spec volume.
+#
+#   kubectl create namespace flexprice-collector
+#   kubectl -n flexprice-collector create secret generic collector-secrets \
+#     --from-literal=syncron-prom='<prometheus password or token>' \
+#     --from-literal=flexprice='<flexprice api key>' \
+#     --from-literal=ui-token='<token people use to open the UI>'
+#   kubectl -n flexprice-collector apply -f collector.yaml
+#   kubectl -n flexprice-collector port-forward svc/collector-ui 8090:8090
+#
+# In the UI, name each connection's secret after a key above (secret_ref).
+# The Secret is mounted read-only, so the UI cannot write secret values here.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: collector-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector-ui
+  labels: { app: collector-ui }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: collector-ui }
+  template:
+    metadata:
+      labels: { app: collector-ui }
+    spec:
+      securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+      containers:
+        - name: collector
+          image: ghcr.io/flexprice/bento-collector:latest
+          args: ["collector", "serve", "--addr", ":8090"]
+          env:
+            - { name: COLLECTOR_GIT, value: "true" }
+            - name: COLLECTOR_UI_TOKEN
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: ui-token } }
+          ports: [{ containerPort: 8090 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8090 } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: collector-data }
+        - name: secrets
+          secret: { secretName: collector-secrets, defaultMode: 0400 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collector-ui
+spec:
+  selector: { app: collector-ui }
+  ports: [{ port: 8090, targetPort: 8090 }]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: collector-run
+spec:
+  schedule: "15 0 * * *"          # 00:15 UTC; keep in line with the collectors' schedule
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 3             # exit 1 (incomplete day, rejects, outage) retries, then the Job fails -> alert on it
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+          affinity:               # a ReadWriteOnce volume must be on the UI pod's node
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: { matchLabels: { app: collector-ui } }
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: collector
+              image: ghcr.io/flexprice/bento-collector:latest
+              args: ["collector", "run", "--all"]
+              volumeMounts:
+                - { name: data, mountPath: /data, readOnly: true }
+                - { name: secrets, mountPath: /secrets, readOnly: true }
+          volumes:
+            - name: data
+              persistentVolumeClaim: { claimName: collector-data }
+            - name: secrets
+              secret: { secretName: collector-secrets, defaultMode: 0400 }
