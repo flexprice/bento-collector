@@ -1,0 +1,132 @@
+# Self-hosted collector next to Prometheus: the UI/API (Deployment) and a daily
+# run of every saved collector (CronJob). Both share the spec volume.
+#
+# Connections are owned by this deployment (ConfigMap below); the UI only manages
+# collectors. Credentials come from your Secret as environment variables:
+#
+#   kubectl create namespace flexprice-collector
+#   kubectl -n flexprice-collector create secret generic collector-secrets \
+#     --from-literal=prometheus-password='<prometheus password or token>' \
+#     --from-literal=flexprice-api-key='<flexprice api key>' \
+#     --from-literal=ui-token='<token people use to open the UI>'
+#   kubectl -n flexprice-collector apply -f collector.yaml
+#   kubectl -n flexprice-collector port-forward svc/collector-ui 8090:8090
+#
+# The Secret can be synced from AWS/GCP Secrets Manager or Vault by External
+# Secrets Operator; the collector only reads the environment variables.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: collector-connections
+data:
+  connections.yaml: |
+    connections:
+      - id: prometheus
+        type: prometheus
+        url: http://prometheus-server.monitoring.svc:9090   # your Prometheus
+        auth_type: basic                                    # none | basic | bearer
+        username: collector
+        secret_env: PROMETHEUS_PASSWORD
+      - id: flexprice
+        type: flexprice
+        url: https://api.cloud.flexprice.io
+        secret_env: FLEXPRICE_API_KEY
+        # headers: { x-environment-id: "${FLEXPRICE_ENV_ID}" }   # self-hosted Flexprice only
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: collector-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector-ui
+  labels: { app: collector-ui }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: collector-ui }
+  template:
+    metadata:
+      labels: { app: collector-ui }
+    spec:
+      securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+      containers:
+        - name: collector
+          image: ghcr.io/flexprice/bento-collector:latest
+          args: ["collector", "serve", "--addr", ":8090"]
+          env:
+            - { name: COLLECTOR_GIT, value: "true" }
+            - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
+            - { name: COLLECTOR_LOCK_CONNECTIONS, value: "true" }   # UI cannot add or edit connections
+            - name: COLLECTOR_UI_TOKEN
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: ui-token } }
+            - name: PROMETHEUS_PASSWORD
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+            - name: FLEXPRICE_API_KEY
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
+          ports: [{ containerPort: 8090 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8090 } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: connections, mountPath: /config, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: collector-data }
+        - name: connections
+          configMap: { name: collector-connections }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collector-ui
+spec:
+  selector: { app: collector-ui }
+  ports: [{ port: 8090, targetPort: 8090 }]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: collector-run
+spec:
+  schedule: "15 0 * * *"          # 00:15 UTC. This decides when collectors run; trigger.schedule in a spec is informational
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 3             # exit 1 (incomplete day, rejects, outage) retries, then the Job fails -> alert on it
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+          affinity:               # a ReadWriteOnce volume must be on the UI pod's node
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: { matchLabels: { app: collector-ui } }
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: collector
+              image: ghcr.io/flexprice/bento-collector:latest
+              args: ["collector", "run", "--all"]
+              env:
+                - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
+                - { name: COLLECTOR_LOCK_CONNECTIONS, value: "true" }
+                - name: PROMETHEUS_PASSWORD
+                  valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+                - name: FLEXPRICE_API_KEY
+                  valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
+              volumeMounts:
+                - { name: data, mountPath: /data, readOnly: true }
+                - { name: connections, mountPath: /config, readOnly: true }
+          volumes:
+            - name: data
+              persistentVolumeClaim: { claimName: collector-data }
+            - name: connections
+              configMap: { name: collector-connections }
