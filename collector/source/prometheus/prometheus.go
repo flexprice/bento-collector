@@ -85,7 +85,10 @@ func (Provider) Gate(in source.Input, cp spec.Completeness) ([]any, error) {
 	return []any{map[string]any{"label": "completeness", "branch": map[string]any{
 		"request_map": "root = " + formBody(blobl.Quote(cp.Query), "@window_end_unix"),
 		"processors":  []any{map[string]any{"http": httpProc(in)}},
-		"result_map":  fmt.Sprintf(`meta collector_complete = this.status == "success" && this.data.result.or([]).length() > 0 && this.data.result.all(s -> s.value.index(1).number().catch(0) >= %v)`, cp.Min),
+		// Same rules as Client.Query: warnings fail; scalar or vector values must all reach Min (NaN never does).
+		"result_map": fmt.Sprintf(`let r = this.data.result.or([])
+let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
+meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= %v)`, cp.Min),
 	}}}, nil
 }
 

@@ -48,7 +48,10 @@ pipeline:
                   url: https://prometheus.syncron.internal/api/v1/query
                   verb: POST
             request_map: root = "query=" + "count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440".escape_url_query() + "&time=" + @window_end_unix.ts_format("2006-01-02T15:04:05Z07:00", "UTC").escape_url_query()
-            result_map: meta collector_complete = this.status == "success" && this.data.result.or([]).length() > 0 && this.data.result.all(s -> s.value.index(1).number().catch(0) >= 0.999)
+            result_map: |-
+              let r = this.data.result.or([])
+              let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
+              meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= 0.999)
           label: completeness
         - label: completeness_gate
           mapping: root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below 0.999); nothing sent. Re-run with COLLECTOR_DAY=" + @usage_date + " once the data is complete.") } else { this }
