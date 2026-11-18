@@ -30,7 +30,7 @@ services:
       COLLECTOR_GIT: "true"
       COLLECTOR_UI_TOKEN: ${COLLECTOR_UI_TOKEN:-syncron-ui-token}
       COLLECTOR_CONNECTIONS_FILE: /config/connections.yaml
-      COLLECTOR_LOCK_CONNECTIONS: "true"
+      PROMETHEUS_URL: http://prometheus:9090
       PROMETHEUS_PASSWORD: syncron-secret
       FLEXPRICE_URL: ${FLEXPRICE_URL:-http://host.docker.internal:8080}
       FLEXPRICE_API_KEY: ${FLEXPRICE_API_KEY:?set FLEXPRICE_API_KEY}

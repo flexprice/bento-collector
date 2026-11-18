@@ -2,7 +2,7 @@
 connections:
   - id: syncron-prom
     type: prometheus
-    url: http://prometheus:9090
+    url: ${PROMETHEUS_URL}
     auth_type: basic
     username: syncron
     secret_env: PROMETHEUS_PASSWORD

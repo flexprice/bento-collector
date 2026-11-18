@@ -112,9 +112,12 @@ docker compose -f examples/collector/syncron-sandbox/docker-compose.yml run --rm
 ```bash
 examples/collector/syncron-sandbox/up.sh                       # Prometheus on :9095 (needs bcrypt; uses local prometheus/promtool or Docker)
 FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=… python3 examples/collector/syncron-sandbox/flexprice_setup.py
-COLLECTOR_UI_TOKEN=dev ./bento-flexprice collector serve --data ./collector-data &
-COLLECTOR_UI_TOKEN=dev COLLECTOR_DATA_DIR=./collector-data BENTO_FLEXPRICE=./bento-flexprice \
-  FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=… python3 examples/collector/syncron-sandbox/scenarios.py
+export COLLECTOR_UI_TOKEN=dev COLLECTOR_DATA_DIR=./collector-data \
+  COLLECTOR_CONNECTIONS_FILE=examples/collector/syncron-sandbox/connections.yaml \
+  PROMETHEUS_URL=http://127.0.0.1:9095 PROMETHEUS_PASSWORD=syncron-secret \
+  FLEXPRICE_URL=http://localhost:8080 FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=…
+./bento-flexprice collector serve &
+BENTO_FLEXPRICE=./bento-flexprice python3 examples/collector/syncron-sandbox/scenarios.py
 ```
 
 ## Check that Prometheus and Flexprice agree

@@ -5,7 +5,8 @@ Needs the sandbox Prometheus (./up.sh), a Flexprice with the setup applied
 
   COLLECTOR_URL     default http://127.0.0.1:8090
   COLLECTOR_UI_TOKEN
-  COLLECTOR_DATA_DIR / COLLECTOR_SECRETS_DIR  same as the serve process, for CLI runs
+  COLLECTOR_DATA_DIR / COLLECTOR_CONNECTIONS_FILE, PROMETHEUS_URL, PROMETHEUS_PASSWORD
+                    same as the serve process, for CLI runs
   BENTO_FLEXPRICE   path to the binary
   FLEXPRICE_URL, FLEXPRICE_API_KEY, FLEXPRICE_ENV_ID
   PROM_URL, PROM_USER, PROM_PASSWORD
@@ -27,6 +28,7 @@ FP = os.environ.get("FLEXPRICE_URL", "http://localhost:8080")
 FP_KEY = os.environ["FLEXPRICE_API_KEY"]
 FP_ENV = os.environ.get("FLEXPRICE_ENV_ID", "")
 PROM = os.environ.get("PROM_URL", "http://127.0.0.1:9095")
+PROM_PASSWORD = os.environ.get("PROMETHEUS_PASSWORD", os.environ.get("PROM_PASSWORD", "syncron-secret"))
 
 today = dt.datetime.now(dt.timezone.utc).date()
 D = lambda n: (today - dt.timedelta(days=n)).isoformat()  # noqa: E731
@@ -40,7 +42,10 @@ def call(method, url, body=None, headers=None):
         with urllib.request.urlopen(req, timeout=120) as r:
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except json.JSONDecodeError:
+            return e.code, {}
 
 
 def api(method, path, body=None):
@@ -59,10 +64,14 @@ def record(name, ok, detail):
     print(("PASS " if ok else "FAIL ") + name + " — " + detail, flush=True)
 
 
-def cli(*args):
-    p = subprocess.run([BIN, "collector", "run", *args], capture_output=True, text=True, timeout=300)
+def cli(*args, env=None):
+    p = subprocess.run([BIN, "collector", "run", *args], capture_output=True, text=True, timeout=300, env={**os.environ, **(env or {})})
     runs = [json.loads(line) for line in p.stdout.splitlines() if line.startswith("{")]
     return p.returncode, runs, p.stderr
+
+
+def first_error(runs):
+    return next((c["message"] for r in runs for c in r["checks"] if c["level"] == "error"), "")
 
 
 def settled_usage(event_name, customer, day, expect, seconds=60):
@@ -104,25 +113,16 @@ def cpu_collector(**mapping):
 
 
 def main():
-    # 1. Connections
-    prom = {"type": "prometheus", "url": PROM, "auth_type": "basic", "username": os.environ.get("PROM_USER", "syncron"), "secret": "wrong-password"}
-    api("PUT", "/api/connections/syncron-prom", prom)
-    _, t = api("POST", "/api/connections/syncron-prom/test")
-    record("Connect: wrong Prometheus password is caught", not t["ok"] and "credentials" in t["message"], t["message"])
-    prom["secret"] = os.environ.get("PROM_PASSWORD", "syncron-secret")
-    api("PUT", "/api/connections/syncron-prom", prom)
+    # 1. Connections come from the deployment's connections file
+    _, conns = api("GET", "/api/connections")
+    record("Connect: connections listed from the connections file", {"syncron-prom", "flexprice"} <= {c["id"] for c in conns}, json.dumps([{k: c.get(k) for k in ("id", "secret_env")} for c in conns]))
     _, t = api("POST", "/api/connections/syncron-prom/test")
     record("Connect: Prometheus with basic auth", t["ok"], t["message"])
-    _, conns = api("GET", "/api/connections")
-    record("Connect: secret never returned by the API", "syncron-secret" not in json.dumps(conns) and all("secret" not in c for c in conns), json.dumps([{k: c[k] for k in ("id", "has_secret")} for c in conns]))
-    fpc = {"type": "flexprice", "url": FP, "auth_type": "api_key", "secret": "sk_bad", "headers": {"x-environment-id": FP_ENV} if FP_ENV else {}}
-    api("PUT", "/api/connections/flexprice", fpc)
-    _, t = api("POST", "/api/connections/flexprice/test")
-    record("Connect: bad Flexprice key is caught", not t["ok"], t["message"])
-    fpc["secret"] = FP_KEY
-    api("PUT", "/api/connections/flexprice", fpc)
     _, t = api("POST", "/api/connections/flexprice/test")
     record("Connect: Flexprice", t["ok"], t["message"])
+    record("Connect: secrets never returned by the API", PROM_PASSWORD not in json.dumps(conns) and FP_KEY not in json.dumps(conns), "only secret_env names")
+    st, _ = api("PUT", "/api/connections/syncron-prom", {"type": "prometheus", "url": "http://evil.example"})
+    record("Connect: the UI cannot change a connection", st >= 400, f"PUT -> {st}")
 
     # 2. Preview a normal day
     _, p = api("POST", "/api/preview", {"collector": cpu_collector(), "day": D(1)})
@@ -183,11 +183,13 @@ def main():
     neg_day = summary.get(D(2), "")
     record("Backfill: 5 days run; gap day sends nothing; negative day partially sends", code == 1 and gap_failed and "rejected=1" in neg_day, json.dumps(summary))
 
-    # 11. Prometheus down
-    api("PUT", "/api/connections/syncron-prom", dict(prom, url="http://127.0.0.1:9"))
-    code, runs, err = cli("--collector", "syncron-cpu-hours", "--day", D(1), "--dry-run")
-    record("Outage: Prometheus unreachable fails the run (exit 1)", code == 1 and (not runs or not runs[0]["ok"]), (runs[0]["checks"][0]["message"] if runs else err.strip())[:200])
-    api("PUT", "/api/connections/syncron-prom", prom)
+    # 11. Prometheus down, wrong credentials
+    code, runs, err = cli("--collector", "syncron-cpu-hours", "--day", D(1), "--dry-run", env={"PROMETHEUS_URL": "http://127.0.0.1:9"})
+    record("Outage: Prometheus unreachable fails the run (exit 1)", code == 1 and (not runs or not runs[0]["ok"]), (first_error(runs) or err.strip())[:200])
+    code, runs, err = cli("--collector", "syncron-cpu-hours", "--day", D(1), "--dry-run", env={"PROMETHEUS_PASSWORD": "wrong-password"})
+    record("Credentials: wrong Prometheus password fails the run", code == 1 and (not runs or not runs[0]["ok"]), (first_error(runs) or err.strip())[:200])
+    code, runs, err = cli("--collector", "syncron-cpu-hours", "--day", D(1), "--dry-run", env={"FLEXPRICE_API_KEY": "sk_bad"})
+    record("Credentials: bad Flexprice key fails the run", code == 1 and (not runs or not runs[0]["ok"]), (first_error(runs) or err.strip())[:200])
 
     # 12. Second metric: Spark jobs per tenant
     spark = {"id": "syncron-spark-jobs", "name": "Syncron Spark jobs",
