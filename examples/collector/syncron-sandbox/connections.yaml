@@ -1,0 +1,13 @@
+# Sandbox connections, owned by the compose deployment (secrets come from env).
+connections:
+  - id: syncron-prom
+    type: prometheus
+    url: http://prometheus:9090
+    auth_type: basic
+    username: syncron
+    secret_env: PROMETHEUS_PASSWORD
+  - id: flexprice
+    type: flexprice
+    url: ${FLEXPRICE_URL}
+    secret_env: FLEXPRICE_API_KEY
+    headers: { x-environment-id: "${FLEXPRICE_ENV_ID}" }
