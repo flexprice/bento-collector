@@ -27,7 +27,10 @@ const (
 	UsageDatePlaceholder = "__USAGE_DATE__"
 )
 
-var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+var (
+	idPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+	sensitiveHeader = regexp.MustCompile(`(?i)(authorization|cookie|token|secret|password|api[-_]?key|credential)`)
+)
 
 // Connection is a source or destination the collector talks to. Secret values
 // never live here, only a reference to the secret store.
@@ -123,6 +126,9 @@ func (c *Connection) Validate() error {
 	switch c.AuthType {
 	case "", "none":
 	case "bearer", "api_key":
+		if c.AuthType == "api_key" && c.Type != ConnectionFlexprice {
+			return fmt.Errorf("auth api_key is only for Flexprice connections; use bearer or basic")
+		}
 		if c.SecretRef == "" {
 			return fmt.Errorf("auth %q needs a secret", c.AuthType)
 		}
@@ -132,6 +138,11 @@ func (c *Connection) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unknown auth_type %q", c.AuthType)
+	}
+	for k := range c.Headers {
+		if sensitiveHeader.MatchString(k) {
+			return fmt.Errorf("header %q looks like a credential; use the connection's auth and secret instead, headers are stored in plain text", k)
+		}
 	}
 	if c.Type == ConnectionFlexprice && c.SecretRef == "" {
 		return fmt.Errorf("a Flexprice connection needs an API key secret")

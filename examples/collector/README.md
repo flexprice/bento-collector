@@ -22,6 +22,8 @@ One binary and image runs everywhere: next to a private Prometheus (self-hosted)
 
 Common flags: `--data` (`COLLECTOR_DATA_DIR`), `--secrets` (`COLLECTOR_SECRETS_DIR`, default `<data>/../collector-secrets`, must be outside the data dir), `--git` (`COLLECTOR_GIT=true`: commit each save).
 
+Runs happen when the scheduler starts `run` (the CronJob/ECS schedule); a collector's `trigger.schedule` records the intended time but does not start anything by itself. `collector render` exports use the Flexprice output plugin, which has no custom headers, so `x-environment-id` is not carried over (use an environment-scoped API key).
+
 `run` exits **1** when any collector/day failed or rejected rows, so the scheduler retries and alerts. It exits 0 only when everything was sent.
 
 ## What a run does

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -105,7 +106,11 @@ func serve(args []string, stderr io.Writer) error {
 		_ = hs.Shutdown(shutdown)
 	}()
 	if token == "" {
-		fmt.Fprintln(stderr, "warning: COLLECTOR_UI_TOKEN is not set; the UI and API are open to anyone who can reach", *addr)
+		host, _, _ := net.SplitHostPort(*addr)
+		if ip := net.ParseIP(host); (ip == nil || !ip.IsLoopback()) && host != "localhost" && os.Getenv("COLLECTOR_ALLOW_NO_AUTH") != "true" {
+			return fmt.Errorf("set COLLECTOR_UI_TOKEN before listening on %s (or bind to 127.0.0.1, or set COLLECTOR_ALLOW_NO_AUTH=true behind your own auth proxy)", *addr)
+		}
+		fmt.Fprintln(stderr, "warning: COLLECTOR_UI_TOKEN is not set; the UI and API are open on", *addr)
 	}
 	fmt.Fprintf(stderr, "collector UI listening on %s (data %s, secrets %s)\n", *addr, c.data, secrets.Dir)
 	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

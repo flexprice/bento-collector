@@ -205,10 +205,10 @@ func (e *Engine) execute(ctx context.Context, c Collector, w Window, dryRun bool
 				events = append(events, r.Event)
 			}
 		}
-		if err := fp.SendBulk(ctx, events); err != nil {
-			res.block("Sending to Flexprice failed: %v", err)
-		} else {
-			res.Sent = len(events)
+		sent, err := fp.SendBulk(ctx, events)
+		res.Sent = sent
+		if err != nil {
+			res.block("Sending to Flexprice failed after %d of %d events (re-running is safe): %v", sent, len(events), err)
 		}
 	}
 	res.OK = !res.blocked()
@@ -229,7 +229,7 @@ func (e *Engine) completeness(ctx context.Context, in RenderInput, cp Completene
 	out.OK = true
 	for _, s := range samples {
 		out.Values = append(out.Values, s.Value)
-		if s.Value < cp.Min {
+		if !(s.Value >= cp.Min) { // NaN never passes
 			out.OK = false
 		}
 	}

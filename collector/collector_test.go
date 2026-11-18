@@ -323,3 +323,35 @@ func TestStoreVersions(t *testing.T) {
 		t.Fatal("path traversal must be refused")
 	}
 }
+
+func TestConnectionValidation(t *testing.T) {
+	bad := []Connection{
+		{ID: "p", Type: ConnectionPrometheus, URL: "http://x", AuthType: "api_key", SecretRef: "p"},
+		{ID: "p", Type: ConnectionPrometheus, URL: "http://x", Headers: map[string]string{"Authorization": "Bearer x"}},
+		{ID: "f", Type: ConnectionFlexprice, URL: "http://x", AuthType: "api_key", SecretRef: "f", Headers: map[string]string{"X-Api-Key": "k"}},
+	}
+	for _, c := range bad {
+		if err := c.Validate(); err == nil {
+			t.Errorf("expected %+v to be refused", c)
+		}
+	}
+	ok := Connection{ID: "f", Type: ConnectionFlexprice, URL: "http://x", AuthType: "api_key", SecretRef: "f", Headers: map[string]string{"x-environment-id": "env"}}
+	if err := ok.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCompletenessNaNFails(t *testing.T) {
+	fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}}
+	fps, prom := httptest.NewServer(fp), fakePrometheus(t, "NaN", threeTenants)
+	defer fps.Close()
+	defer prom.Close()
+	e, c := newTestEngine(t, prom.URL, fps.URL)
+	res, err := e.Run(context.Background(), c, DayWindow(time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Sent != 0 || res.OK {
+		t.Fatal("a NaN completeness value must not pass")
+	}
+}

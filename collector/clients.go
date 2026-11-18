@@ -89,9 +89,10 @@ func (p PrometheusClient) Query(ctx context.Context, query string, at time.Time)
 		return nil, err
 	}
 	var r struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
-		Data   struct {
+		Status   string   `json:"status"`
+		Error    string   `json:"error"`
+		Warnings []string `json:"warnings"`
+		Data     struct {
 			ResultType string          `json:"resultType"`
 			Result     json.RawMessage `json:"result"`
 		} `json:"data"`
@@ -101,6 +102,9 @@ func (p PrometheusClient) Query(ctx context.Context, query string, at time.Time)
 	}
 	if r.Status != "success" {
 		return nil, fmt.Errorf("query failed: %s", r.Error)
+	}
+	if len(r.Warnings) > 0 {
+		return nil, fmt.Errorf("prometheus returned warnings, the result may be partial: %s", strings.Join(r.Warnings, "; "))
 	}
 	switch r.Data.ResultType {
 	case "scalar":
@@ -217,15 +221,15 @@ func (f FlexpriceClient) MetersFor(ctx context.Context, eventName string) ([]str
 	return ids, nil
 }
 
-// SendBulk posts events in chunks of 1000.
-func (f FlexpriceClient) SendBulk(ctx context.Context, events []map[string]any) error {
+// SendBulk posts events in chunks of 1000 and returns how many were accepted.
+func (f FlexpriceClient) SendBulk(ctx context.Context, events []map[string]any) (int, error) {
 	for i := 0; i < len(events); i += 1000 {
 		j := min(i+1000, len(events))
 		if _, err := f.do(ctx, http.MethodPost, "/v1/events/bulk", map[string]any{"events": events[i:j]}, nil); err != nil {
-			return err
+			return i, err
 		}
 	}
-	return nil
+	return len(events), nil
 }
 
 func truncate(s string, n int) string {

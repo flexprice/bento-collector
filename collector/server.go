@@ -103,11 +103,11 @@ func (s *Server) saveConnection(w http.ResponseWriter, r *http.Request) {
 	if c.SecretRef == "" && (body.Secret != "" || c.Type == ConnectionFlexprice || (c.AuthType != "" && c.AuthType != "none")) {
 		c.SecretRef = c.ID
 	}
+	if err := c.Validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 	if body.Secret != "" {
-		if err := ValidID(c.SecretRef); err != nil {
-			writeErr(w, http.StatusBadRequest, err)
-			return
-		}
 		if err := s.Secrets.Put(c.SecretRef, body.Secret); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
