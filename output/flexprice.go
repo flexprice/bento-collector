@@ -40,6 +40,9 @@ func flexpriceConfigSpec() *service.ConfigSpec {
 		Field(service.NewStringField("scheme").
 			Description("The scheme for the API (http or https)").
 			Default("https")).
+		Field(service.NewStringMapField("headers").
+			Description("Extra HTTP headers on every request, e.g. x-environment-id for self-hosted Flexprice").
+			Optional()).
 		Field(service.NewBatchPolicyField("batching")).
 		Field(service.NewOutputMaxInFlightField().Default(10))
 }
@@ -87,6 +90,15 @@ func init() {
 			config.Scheme = scheme
 			config.Host = apiHost
 			config.AddDefaultHeader("x-api-key", apiKey)
+			if conf.Contains("headers") {
+				headers, err := conf.FieldStringMap("headers")
+				if err != nil {
+					return nil, batchPolicy, 0, err
+				}
+				for k, v := range headers {
+					config.AddDefaultHeader(k, v)
+				}
+			}
 
 			client := flexprice.NewAPIClient(config)
 

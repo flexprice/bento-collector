@@ -1,0 +1,12 @@
+# Connections owned by this deployment. ${VAR} values and every secret_env come from .env.
+connections:
+  - id: prometheus
+    type: prometheus
+    url: ${PROMETHEUS_URL}
+    auth_type: basic          # none | basic | bearer
+    username: ${PROMETHEUS_USER}
+    secret_env: PROMETHEUS_PASSWORD
+  - id: flexprice
+    type: flexprice
+    url: https://api.cloud.flexprice.io
+    secret_env: FLEXPRICE_API_KEY
