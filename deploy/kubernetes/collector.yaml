@@ -7,10 +7,12 @@
 #   kubectl create namespace flexprice-collector
 #   kubectl -n flexprice-collector create secret generic collector-secrets \
 #     --from-literal=prometheus-password='<prometheus password or token>' \
-#     --from-literal=flexprice-api-key='<flexprice api key>' \
-#     --from-literal=ui-token='<token people use to open the UI>'
+#     --from-literal=flexprice-api-key='<flexprice api key>'
 #   kubectl -n flexprice-collector apply -f collector.yaml
 #   kubectl -n flexprice-collector port-forward svc/collector-ui 8090:8090
+#
+# The UI has no login: keep the Service cluster-internal, or put your own
+# authenticating proxy (SSO) in front of it.
 #
 # The Secret can be synced from AWS/GCP Secrets Manager or Vault by External
 # Secrets Operator; the collector only reads the environment variables.
@@ -65,8 +67,6 @@ spec:
           env:
             - { name: COLLECTOR_GIT, value: "true" }
             - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
-            - name: COLLECTOR_UI_TOKEN
-              valueFrom: { secretKeyRef: { name: collector-secrets, key: ui-token } }
             - name: PROMETHEUS_PASSWORD
               valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
             - name: FLEXPRICE_API_KEY

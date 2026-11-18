@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { ActivityIcon, CableIcon, KeyRoundIcon, LayersIcon } from 'lucide-react'
-import { api, cn, setToken, Unauthorized, type Collector, type Connection } from '@/lib'
-import { Button, Field, Input } from '@/components/ui'
+import { ActivityIcon, CableIcon, LayersIcon } from 'lucide-react'
+import { api, cn, type Collector, type Connection } from '@/lib'
 import { CollectorsPage } from '@/pages/Collectors'
 import { ConnectionsPage } from '@/pages/Connections'
 import { CollectorEditor } from '@/pages/Editor'
@@ -30,7 +29,6 @@ export function App() {
   const hash = useHash()
   const [connections, setConnections] = useState<Connection[]>([])
   const [collectors, setCollectors] = useState<Collector[]>([])
-  const [needToken, setNeedToken] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [toastMsg, setToastMsg] = useState<{ msg: string; error?: boolean } | null>(null)
 
@@ -44,10 +42,8 @@ export function App() {
       const [cs, cols] = await Promise.all([api<Connection[]>('GET', '/api/connections'), api<Collector[]>('GET', '/api/collectors')])
       setConnections(cs)
       setCollectors(cols)
-      setNeedToken(false)
     } catch (e) {
-      if (e instanceof Unauthorized) setNeedToken(true)
-      else toast((e as Error).message, true)
+      toast((e as Error).message, true)
     } finally {
       setLoaded(true)
     }
@@ -57,8 +53,6 @@ export function App() {
 
   const go = (h: string) => { location.hash = h }
   const [, page, id] = hash.split('/')
-
-  if (needToken) return <TokenGate onSubmit={(t) => { setToken(t); void reload() }} />
 
   let body: ReactNode = null
   if (loaded) {
@@ -106,22 +100,5 @@ function NavItem({ icon, label, active, href, count }: { icon: ReactNode; label:
       <span className="flex-1">{label}</span>
       <span className="text-muted-foreground text-xs tabular-nums">{count}</span>
     </a>
-  )
-}
-
-function TokenGate({ onSubmit }: { onSubmit: (t: string) => void }) {
-  const [t, setT] = useState('')
-  return (
-    <div className="bg-muted/30 flex min-h-dvh items-center justify-center p-6">
-      <form className="bg-background flex w-full max-w-sm flex-col gap-4 rounded-xl border p-6 shadow-xs" onSubmit={(e) => { e.preventDefault(); onSubmit(t.trim()) }}>
-        <div className="bg-primary text-primary-foreground flex size-9 items-center justify-center rounded-lg"><KeyRoundIcon className="size-4" /></div>
-        <div>
-          <h1 className="text-lg font-medium">Sign in to the collector</h1>
-          <p className="text-muted-foreground text-[13px]">Enter the collector token set as COLLECTOR_UI_TOKEN on this deployment.</p>
-        </div>
-        <Field label="Collector token"><Input type="password" autoFocus value={t} onChange={(e) => setT(e.target.value)} /></Field>
-        <Button type="submit" disabled={!t.trim()}>Continue</Button>
-      </form>
-    </div>
   )
 }

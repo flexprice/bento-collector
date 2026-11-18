@@ -16,7 +16,7 @@ One binary and image runs everywhere: next to a private Prometheus (self-hosted)
 
 | Command | What it does |
 |---|---|
-| `collector serve [--addr :8090]` | UI + API. Set `COLLECTOR_UI_TOKEN`; without it the UI is open to anyone who can reach it |
+| `collector serve [--addr :8090]` | UI + API. There is no login: anyone who can reach the port can edit collectors, so keep it internal or behind your own auth proxy |
 | `collector run --collector <id> \| --all [--day YYYY-MM-DD] [--from YYYY-MM-DD] [--dry-run]` | Runs one closed UTC day (default yesterday) or a backfill range, prints one JSON result per collector/day |
 | `collector render --collector <id> [--version N] [--day …]` | Prints the full Bento config (secrets as `${ENV}`), runnable with `bento-flexprice -c` |
 

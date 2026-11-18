@@ -9,7 +9,6 @@ import (
 	"github.com/flexprice/bento-collector/collector/web"
 
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -22,8 +21,6 @@ import (
 type Server struct {
 	Store  store.Store
 	Engine *engine.Engine
-	// Token, when set, is required as "Authorization: Bearer <token>" on /api.
-	Token string
 }
 
 func (s *Server) Handler() http.Handler {
@@ -39,7 +36,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/collectors/{id}/versions/{version}", s.getVersion)
 	api.HandleFunc("POST /api/preview", s.preview)
 	api.HandleFunc("POST /api/render", s.render)
-	mux.Handle("/api/", s.auth(api))
+	mux.Handle("/api/", api)
 	sub := web.FS()
 	mux.Handle("/", uiCache(http.FileServerFS(sub)))
 	return securityHeaders(mux)
@@ -62,19 +59,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.Token != "" {
-			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
-				writeErr(w, http.StatusUnauthorized, errors.New("a valid collector token is required"))
-				return
-			}
-		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -1,6 +1,7 @@
 # Try the collector UI on one machine. Connections and credentials are owned by
 # this deployment: edit connections.yaml and put the secrets in .env
-# (PROMETHEUS_PASSWORD, FLEXPRICE_API_KEY, COLLECTOR_UI_TOKEN). The UI manages collectors.
+# (PROMETHEUS_URL, PROMETHEUS_USER, PROMETHEUS_PASSWORD, FLEXPRICE_API_KEY). The UI manages
+# collectors and has no login, so it is bound to 127.0.0.1.
 #   docker compose up -d
 # Run a day by hand (or from cron):
 #   docker compose run --rm collector-ui collector run --all
@@ -13,7 +14,6 @@ services:
     environment:
       COLLECTOR_GIT: "true"
       COLLECTOR_CONNECTIONS_FILE: /config/connections.yaml
-      COLLECTOR_UI_TOKEN: ${COLLECTOR_UI_TOKEN:?set COLLECTOR_UI_TOKEN}
     ports: ["127.0.0.1:8090:8090"]
     volumes:
       - collector-data:/data

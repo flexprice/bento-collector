@@ -59,20 +59,11 @@ export interface PreviewResult {
   ok: boolean
 }
 
-export class Unauthorized extends Error {}
-
-let token = localStorage.getItem('collectorToken') ?? ''
-export const setToken = (t: string) => {
-  token = t
-  localStorage.setItem('collectorToken', t)
-}
 
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) headers.Authorization = 'Bearer ' + token
   const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
   const data = await res.json().catch(() => ({}))
-  if (res.status === 401) throw new Unauthorized((data as { error?: string }).error ?? 'Unauthorized')
   if (!res.ok) throw new Error((data as { error?: string }).error ?? res.statusText)
   return data as T
 }
