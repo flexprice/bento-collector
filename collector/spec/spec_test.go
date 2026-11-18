@@ -45,17 +45,17 @@ func TestParseDay(t *testing.T) {
 
 func TestConnectionValidation(t *testing.T) {
 	bad := []spec.Connection{
-		{ID: "p", Type: spec.ConnectionPrometheus, URL: "http://x", AuthType: "api_key", SecretEnv: "P"},
-		{ID: "p", Type: spec.ConnectionPrometheus, URL: "http://x", Headers: map[string]string{"Authorization": "Bearer x"}},
-		{ID: "f", Type: spec.ConnectionFlexprice, URL: "http://x", AuthType: "api_key", SecretEnv: "F", Headers: map[string]string{"X-Api-Key": "k"}},
-		{ID: "f", Type: spec.ConnectionFlexprice, URL: "http://x", SecretEnv: "not a var"},
+		{ID: "p", Type: "prometheus", URL: "http://x", AuthType: "basic", SecretEnv: "P"},
+		{ID: "p", Type: "prometheus", URL: "http://x", Headers: map[string]string{"Authorization": "Bearer x"}},
+		{ID: "f", Type: "flexprice", URL: "http://x", AuthType: "api_key", SecretEnv: "F", Headers: map[string]string{"X-Api-Key": "k"}},
+		{ID: "f", Type: "flexprice", URL: "http://x", SecretEnv: "not a var"},
 	}
 	for _, c := range bad {
 		if err := c.Validate(); err == nil {
 			t.Errorf("expected %+v to be refused", c)
 		}
 	}
-	ok := spec.Connection{ID: "f", Type: spec.ConnectionFlexprice, URL: "http://x", AuthType: "api_key", SecretEnv: "F", Headers: map[string]string{"x-environment-id": "env"}}
+	ok := spec.Connection{ID: "f", Type: "flexprice", URL: "http://x", AuthType: "api_key", SecretEnv: "F", Headers: map[string]string{"x-environment-id": "env"}}
 	if err := ok.Validate(); err != nil {
 		t.Fatal(err)
 	}

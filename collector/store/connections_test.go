@@ -31,7 +31,7 @@ func TestLoadConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	list := conns.List()
-	if len(list) != 2 || list[0].URL != "http://prom:9090" || list[0].SecretEnv != "PROM_PASSWORD" || list[1].AuthType != "api_key" || list[1].Headers["x-environment-id"] != "env-1" {
+	if len(list) != 2 || list[0].URL != "http://prom:9090" || list[0].SecretEnv != "PROM_PASSWORD" || list[1].Headers["x-environment-id"] != "env-1" {
 		t.Fatalf("unexpected connections: %+v", list)
 	}
 	if v, err := conns.Secret(list[0]); err != nil || v != "pw" {

@@ -35,7 +35,7 @@ function ConnectionCard({ c }: { c: Connection }) {
     >
       <div className="flex flex-wrap items-center gap-2 text-[13px]">
         <Badge tone="info">{c.type === 'prometheus' ? 'Prometheus · source' : 'Flexprice · destination'}</Badge>
-        <Badge>{c.auth_type === 'basic' ? `Basic auth · ${c.username}` : c.auth_type === 'bearer' ? 'Bearer token' : c.auth_type === 'api_key' ? 'API key' : 'No auth'}</Badge>
+        <Badge>{c.auth_type === 'basic' ? `Basic auth · ${c.username}` : c.auth_type === 'bearer' ? 'Bearer token' : c.auth_type === 'api_key' || c.type === 'flexprice' ? 'API key' : 'No auth'}</Badge>
         {c.secret_env ? <Badge tone="success" dot>Secret from ${c.secret_env}</Badge> : null}
         {Object.keys(c.headers ?? {}).length ? <Badge>{Object.keys(c.headers ?? {}).length} header(s)</Badge> : null}
       </div>

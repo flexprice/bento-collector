@@ -18,11 +18,22 @@ One binary and image runs everywhere: next to a private Prometheus (self-hosted)
 |---|---|
 | `collector serve [--addr :8090]` | UI + API. There is no login: anyone who can reach the port can edit collectors, so keep it internal or behind your own auth proxy |
 | `collector run --collector <id> \| --all [--day YYYY-MM-DD] [--from YYYY-MM-DD] [--dry-run]` | Runs one closed UTC day (default yesterday) or a backfill range, prints one JSON result per collector/day |
-| `collector render --collector <id> [--version N] [--day …]` | Prints the full Bento config (secrets as `${ENV}`), runnable with `bento-flexprice -c` |
+| `collector render --collector <id> [--version N] [--day …]` | Prints a Bento config that runs the collector with plain `bento-flexprice -c` (secrets as `${ENV}`): long-running on `trigger.schedule`, or one run with `--day` |
 
 Common flags: `--connections` (`COLLECTOR_CONNECTIONS_FILE`, required, see below), `--data` (`COLLECTOR_DATA_DIR`) and `--git` (`COLLECTOR_GIT=true`: commit each save).
 
-Runs happen when the scheduler starts `run` (the CronJob/ECS schedule); a collector's `trigger.schedule` records the intended time but does not start anything by itself. `collector render` exports use the Flexprice output plugin, which has no custom headers, so `x-environment-id` is not carried over (use an environment-scoped API key).
+### Two ways to run a collector
+
+| | `collector run` (scheduled by a CronJob) | Rendered config with plain Bento |
+|---|---|---|
+| When | The CronJob's schedule | `trigger.schedule` from the spec, in the config's `generate` input (UTC) |
+| Window | Yesterday, or `--day` / `--from` | Yesterday at each tick, or `COLLECTOR_DAY=YYYY-MM-DD`; `render --day` for a one-off |
+| Completeness gate | Yes | Yes (rendered into the config) |
+| Meter and customer checks before sending | Yes | No (preview only); rejected rows are logged |
+| Exit code for retries and alerts | 1 on any failure or rejected row | Bento's own |
+| Connection headers (e.g. `x-environment-id`) | Sent | Sent (`headers` on the flexprice output) |
+
+Both build the same pipeline and the same `event_id`s, so a day sent by either path is not double-billed. Re-render and redeploy the config after saving a new version.
 
 `run` exits **1** when any collector/day failed or rejected rows, so the scheduler retries and alerts. It exits 0 only when everything was sent.
 
@@ -90,13 +101,18 @@ collector/
   cli.go      serve / run / render commands (called from main.go)
   spec/       Collector, Connection, Window types and validation
   store/      FileStore (versions, git) and the connections file
-  render/     spec → Bento pipeline config (golden test in testdata/)
-  engine/     preview and run: completeness, in-process Bento pipeline, Flexprice checks, send
-  server/     HTTP API, auth, embedded UI
+  source/     Provider interface + Registry: what an input source must implement
+    prometheus/   Prometheus provider: HTTP client, Bento fetch stages, completeness
+  flexprice/  destination: API client (meters, customers, bulk send) and Bento output
+  render/     generic pipeline: window → provider stages → normalized row → event mapping (golden tests in testdata/)
+  engine/     preview and run: resolves provider + connections, completeness, in-process Bento, checks, send
+  server/     HTTP API, embedded UI
   web/        React UI: src/, dist/ (built, embedded by embed.go)
 ```
 
-Dependencies point one way: `spec` ← `store`, `render` ← `engine` ← `server` ← `cli.go`.
+Dependencies point one way: `spec` ← `source`, `flexprice`, `store` ← `render` ← `engine` ← `server` ← `cli.go`. A source provider emits one message per row, normalized to `{"labels": {...}, "value": "...", "at": <unix>}`; everything after that is shared.
+
+**Adding a source** (e.g. Datadog, ClickHouse): add `collector/source/<name>/` implementing `source.Provider` (`ValidateConnection`, `ValidateSource`, `Test`, `Stages`, `Gate`, `Values`) and register it in `cli.go` (`source.NewRegistry(prometheus.Provider{}, <name>.Provider{})`). Connections of that `type` and collectors with that `source.type` then work in the UI, preview, `run` and `render`.
 
 ## Developing the UI
 

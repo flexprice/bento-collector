@@ -11,9 +11,6 @@ import (
 )
 
 const (
-	ConnectionPrometheus = "prometheus"
-	ConnectionFlexprice  = "flexprice"
-
 	ModeWindow    = "window"
 	ModeUsageDate = "usage_date"
 
@@ -69,6 +66,11 @@ type Source struct {
 	Mode string `json:"mode,omitempty"`
 }
 
+// QueryFor is the query for one window, with __USAGE_DATE__ filled in.
+func (s Source) QueryFor(w Window) string {
+	return strings.ReplaceAll(s.Query, UsageDatePlaceholder, w.Start.Format("2006-01-02"))
+}
+
 type Trigger struct {
 	// Schedule is a 5-field cron in UTC for the external scheduler.
 	Schedule     string        `json:"schedule,omitempty"`
@@ -117,8 +119,8 @@ func (c *Connection) Validate() error {
 	if err := ValidID(c.ID); err != nil {
 		return err
 	}
-	if c.Type != ConnectionPrometheus && c.Type != ConnectionFlexprice {
-		return fmt.Errorf("type must be %q or %q", ConnectionPrometheus, ConnectionFlexprice)
+	if c.Type == "" {
+		return fmt.Errorf("type is required")
 	}
 	if !strings.HasPrefix(c.URL, "http://") && !strings.HasPrefix(c.URL, "https://") {
 		return fmt.Errorf("url must start with http:// or https://")
@@ -126,9 +128,6 @@ func (c *Connection) Validate() error {
 	switch c.AuthType {
 	case "", "none":
 	case "bearer", "api_key":
-		if c.AuthType == "api_key" && c.Type != ConnectionFlexprice {
-			return fmt.Errorf("auth api_key is only for Flexprice connections; use bearer or basic")
-		}
 		if c.SecretEnv == "" {
 			return fmt.Errorf("auth %q needs secret_env", c.AuthType)
 		}
@@ -144,9 +143,6 @@ func (c *Connection) Validate() error {
 			return fmt.Errorf("header %q looks like a credential; use auth_type and secret_env instead, headers are plain text", k)
 		}
 	}
-	if c.Type == ConnectionFlexprice && c.SecretEnv == "" {
-		return fmt.Errorf("a Flexprice connection needs secret_env for its API key")
-	}
 	if c.SecretEnv != "" && !EnvVarName.MatchString(c.SecretEnv) {
 		return fmt.Errorf("secret_env %q is not an environment variable name", c.SecretEnv)
 	}
@@ -155,9 +151,6 @@ func (c *Connection) Validate() error {
 
 // Normalize fills defaults so stored specs are explicit.
 func (c *Collector) Normalize() {
-	if c.Source.Type == "" {
-		c.Source.Type = ConnectionPrometheus
-	}
 	if c.Source.Mode == "" {
 		c.Source.Mode = ModeWindow
 	}
@@ -181,8 +174,8 @@ func (c *Collector) Validate() error {
 	if err := ValidID(c.ID); err != nil {
 		add("%v", err)
 	}
-	if c.Source.Type != ConnectionPrometheus {
-		add("source.type must be %q", ConnectionPrometheus)
+	if c.Source.Type == "" {
+		add("source.type is required")
 	}
 	if c.Source.Connection == "" {
 		add("source.connection is required")

@@ -3,8 +3,9 @@ package collector
 
 import (
 	"github.com/flexprice/bento-collector/collector/engine"
-	"github.com/flexprice/bento-collector/collector/render"
 	"github.com/flexprice/bento-collector/collector/server"
+	"github.com/flexprice/bento-collector/collector/source"
+	"github.com/flexprice/bento-collector/collector/source/prometheus"
 	"github.com/flexprice/bento-collector/collector/spec"
 	"github.com/flexprice/bento-collector/collector/store"
 
@@ -27,7 +28,7 @@ const usage = `Usage: bento-flexprice collector <command> [flags]
 Commands:
   serve    Run the collector UI and API
   run      Run collectors for one closed UTC day and send events to Flexprice
-  render   Print the Bento config a collector renders to (secrets as env placeholders)
+  render   Print a Bento config that runs a collector with plain bento-flexprice (secrets as env placeholders)
 
 Run "bento-flexprice collector <command> -h" for flags.
 `
@@ -73,9 +74,12 @@ func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.connections, "connections", os.Getenv("COLLECTOR_CONNECTIONS_FILE"), "YAML file of connections owned by the deployment; values may use ${ENV}, secrets come from secret_env [COLLECTOR_CONNECTIONS_FILE]")
 }
 
-func (c *commonFlags) open() (store.Store, *store.Connections, error) {
+// sources are the input providers this build supports.
+var sources = source.NewRegistry(prometheus.Provider{})
+
+func (c *commonFlags) open() (store.Store, *engine.Engine, error) {
 	if c.connections == "" {
-		return nil, nil, errors.New("--connections (COLLECTOR_CONNECTIONS_FILE) is required: the YAML file listing Prometheus and Flexprice connections")
+		return nil, nil, errors.New("--connections (COLLECTOR_CONNECTIONS_FILE) is required: the YAML file listing source and Flexprice connections")
 	}
 	conns, err := store.LoadConnections(c.connections, os.Getenv)
 	if err != nil {
@@ -85,7 +89,11 @@ func (c *commonFlags) open() (store.Store, *store.Connections, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return st, conns, nil
+	eng, err := engine.New(st, conns, sources)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", c.connections, err)
+	}
+	return st, eng, nil
 }
 
 func serve(args []string, stderr io.Writer) error {
@@ -96,11 +104,11 @@ func serve(args []string, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	st, conns, err := c.open()
+	st, eng, err := c.open()
 	if err != nil {
 		return err
 	}
-	srv := &server.Server{Store: st, Engine: engine.NewEngine(st, conns)}
+	srv := &server.Server{Store: st, Engine: eng}
 	hs := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -137,7 +145,7 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	if err := fs.Parse(args); err != nil {
 		return 2, err
 	}
-	st, conns, err := c.open()
+	st, eng, err := c.open()
 	if err != nil {
 		return 1, err
 	}
@@ -176,7 +184,6 @@ func run(args []string, stdout, stderr io.Writer) (int, error) {
 	if len(collectors) == 0 {
 		return 2, errors.New("nothing to run: pass --collector <id> or --all")
 	}
-	eng := engine.NewEngine(st, conns)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	enc := json.NewEncoder(stdout)
@@ -205,11 +212,11 @@ func renderCmd(args []string, stdout io.Writer) error {
 	c.register(fs)
 	id := fs.String("collector", "", "collector id")
 	version := fs.Int("version", 0, "version (default latest)")
-	day := fs.String("day", "", "UTC day YYYY-MM-DD (default yesterday)")
+	day := fs.String("day", "", "UTC day YYYY-MM-DD: one run for that day (default: a long-running config on trigger.schedule)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	st, conns, err := c.open()
+	st, eng, err := c.open()
 	if err != nil {
 		return err
 	}
@@ -217,15 +224,15 @@ func renderCmd(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	w, err := spec.ParseDay(*day, time.Now())
-	if err != nil {
-		return err
+	var w *spec.Window
+	if *day != "" {
+		d, err := spec.ParseDay(*day, time.Now())
+		if err != nil {
+			return err
+		}
+		w = &d
 	}
-	in, err := engine.NewEngine(st, conns).Resolve(col, w, false)
-	if err != nil {
-		return err
-	}
-	y, err := render.RenderConfig(in)
+	y, err := eng.Render(col, w)
 	if err != nil {
 		return err
 	}

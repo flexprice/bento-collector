@@ -1,137 +1,118 @@
-// Package render turns a collector spec into a Bento pipeline config.
+// Package render assembles a collector's Bento pipeline: the window, the
+// source provider's fetch stages, then the shared row → event mapping.
 package render
 
 import (
+	"github.com/flexprice/bento-collector/collector/internal/blobl"
+	"github.com/flexprice/bento-collector/collector/source"
 	"github.com/flexprice/bento-collector/collector/spec"
 
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"net/url"
-	"sort"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Credentials are resolved secret values. Empty fields render as env-var
-// placeholders so an exported config never contains a secret.
-type Credentials struct {
-	SourceSecret      string
-	DestinationSecret string
-}
+const rfc3339 = `"2006-01-02T15:04:05Z07:00"`
 
-// RenderInput is everything needed to produce one Bento config.
-type RenderInput struct {
-	Collector   spec.Collector
-	Source      spec.Connection
-	Destination spec.Connection
-	Window      spec.Window
-	// QueryTime is the evaluation time for usage_date mode.
-	QueryTime   time.Time
-	Credentials Credentials
-}
-
-func (in RenderInput) Query() string {
-	return strings.ReplaceAll(in.Collector.Source.Query, spec.UsageDatePlaceholder, in.Window.Start.Format("2006-01-02"))
-}
-
-func (in RenderInput) EvalTime() time.Time {
-	if in.Collector.Source.Mode == spec.ModeUsageDate {
-		return in.QueryTime.UTC().Truncate(time.Second)
+// Pipeline is one window without an output; the engine attaches its own
+// consumer so preview and run use exactly this pipeline.
+func Pipeline(p source.Provider, in source.Input) (string, error) {
+	st, err := p.Stages(in)
+	if err != nil {
+		return "", err
 	}
-	return in.Window.End
+	return build(in.Collector, st, windowFixed(in), nil, map[string]any{"drop": map[string]any{}}, "1", "")
 }
 
-// RenderPipeline returns the input and processors only; the engine attaches
-// its own consumer so preview and run use exactly the same pipeline.
-func RenderPipeline(in RenderInput) (string, error) {
-	return render(in, false)
+// Standalone is a config that runs with plain `bento-flexprice -c`, gated by
+// the collector's completeness check and sending to output. With a window it
+// runs once for that day; without, it stays up and runs on trigger.schedule
+// for the day before (or COLLECTOR_DAY=YYYY-MM-DD).
+func Standalone(p source.Provider, in source.Input, output map[string]any, scheduled bool) (string, error) {
+	st, err := p.Stages(in)
+	if err != nil {
+		return "", err
+	}
+	var gate []any
+	if cp := in.Collector.Trigger.Completeness; cp != nil {
+		g, err := p.Gate(in, *cp)
+		if err != nil {
+			return "", err
+		}
+		gate = append(g, map[string]any{"label": "completeness_gate", "mapping": fmt.Sprintf(
+			`root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below %v); nothing sent. Re-run with COLLECTOR_DAY=" + @usage_date + " once the data is complete.") } else { this }`, cp.Min)})
+	}
+	if !scheduled {
+		return build(in.Collector, st, windowFixed(in), gate, output, "1", "")
+	}
+	return build(in.Collector, st, windowScheduled(), gate, output, "0", "TZ=UTC "+in.Collector.Trigger.Schedule)
 }
 
-// RenderConfig returns a complete Bento config including the flexprice output,
-// for export, lint and running with plain `bento-flexprice -c`.
-func RenderConfig(in RenderInput) (string, error) {
-	return render(in, true)
+// The window mapping sets the metadata every later stage reads: window_start,
+// window_end (RFC 3339), window_end_unix, usage_date (YYYY-MM-DD) and now_unix.
+func windowFixed(in source.Input) string {
+	return fmt.Sprintf("let start = %d\nlet now = %d\n", in.Window.Start.Unix(), in.Now.Unix()) + windowMeta
 }
 
-func render(in RenderInput, withOutput bool) (string, error) {
-	c := in.Collector
+func windowScheduled() string {
+	return `let day = env("COLLECTOR_DAY").or("")
+let today = (now().ts_format("2006-01-02", "UTC") + "T00:00:00Z").ts_parse(` + rfc3339 + `).ts_unix()
+let start = if $day != "" { ($day + "T00:00:00Z").ts_parse(` + rfc3339 + `).ts_unix() } else { $today - 86400 }
+let now = now().ts_unix()
+let _open = if $start + 86400 > $now { throw("COLLECTOR_DAY " + $day + " has not finished in UTC") }
+` + windowMeta
+}
+
+const windowMeta = `meta window_start = $start.ts_format(` + rfc3339 + `, "UTC")
+meta window_end = ($start + 86400).ts_format(` + rfc3339 + `, "UTC")
+meta window_end_unix = $start + 86400
+meta usage_date = $start.ts_format("2006-01-02", "UTC")
+meta now_unix = $now
+root = {}
+`
+
+func build(c spec.Collector, st source.Stages, window string, gate []any, output map[string]any, count, interval string) (string, error) {
 	if err := c.Validate(); err != nil {
 		return "", err
 	}
-	if in.Source.Type != spec.ConnectionPrometheus {
-		return "", fmt.Errorf("source connection %q is not a prometheus connection", in.Source.ID)
-	}
-	body := url.Values{}
-	body.Set("query", in.Query())
-	body.Set("time", in.EvalTime().Format(time.RFC3339))
-
-	httpProc := map[string]any{
-		"url":     strings.TrimRight(in.Source.URL, "/") + "/api/v1/query",
-		"verb":    "POST",
-		"headers": sourceHeaders(in),
-		"timeout": "30s",
-		"retries": 3,
-	}
-	if in.Source.AuthType == "basic" {
-		httpProc["basic_auth"] = map[string]any{
-			"enabled":  true,
-			"username": in.Source.Username,
-			"password": secretOr(in.Credentials.SourceSecret, secretEnv(in.Source, "PROMETHEUS_PASSWORD")),
-		}
-	}
-
-	mapping, err := eventMapping(in)
+	mapping, err := eventMapping(c)
 	if err != nil {
 		return "", err
+	}
+	steps := append([]any{}, gate...)
+	steps = append(steps, st.Fetch...)
+	steps = append(steps,
+		// Errors after this marker belong to one row; errors before it fail the whole query.
+		map[string]any{"mutation": `meta collector_row = true`},
+		map[string]any{"label": "normalize_row", "mapping": st.Normalize},
+		map[string]any{"label": "flexprice_event", "mapping": mapping},
+	)
+	n := 1
+	if count == "0" {
+		n = 0
 	}
 	conf := map[string]any{
 		"http":   map[string]any{"enabled": false},
 		"logger": map[string]any{"level": "WARN", "format": "logfmt"},
-		"input": map[string]any{
-			"generate": map[string]any{
-				"count":    1,
-				"interval": "",
-				"mapping":  "root = " + quote(body.Encode()),
-			},
-		},
+		"input": map[string]any{"generate": map[string]any{
+			"count":    n,
+			"interval": interval,
+			"mapping":  window,
+		}},
 		"pipeline": map[string]any{
-			"threads": 1,
-			"processors": []any{
-				map[string]any{"try": []any{
-					map[string]any{"label": "prometheus_query", "http": httpProc},
-					map[string]any{"label": "prometheus_result", "mapping": responseMapping},
-					map[string]any{"unarchive": map[string]any{"format": "json_array"}},
-					map[string]any{"label": "flexprice_event", "mapping": mapping},
-				}},
-			},
+			"threads":    1,
+			"processors": []any{map[string]any{"try": steps}},
 		},
-	}
-	if !withOutput {
-		// The engine fans out to this and its own consumer; drop keeps stdout clean.
-		conf["output"] = map[string]any{"drop": map[string]any{}}
-	}
-	if withOutput {
-		u, err := url.Parse(in.Destination.URL)
-		if err != nil {
-			return "", fmt.Errorf("destination url: %w", err)
-		}
-		conf["output"] = map[string]any{"switch": map[string]any{"cases": []any{
-			map[string]any{"check": "errored()", "output": map[string]any{"reject": "collector " + c.ID + " rejected a row: ${! error() }"}},
-			map[string]any{"check": `@collector_skip == "true"`, "output": map[string]any{"drop": map[string]any{}}},
-			map[string]any{"output": map[string]any{"flexprice": map[string]any{
-				"api_host": u.Host,
-				"scheme":   u.Scheme,
-				"api_key":  secretOr(in.Credentials.DestinationSecret, secretEnv(in.Destination, "FLEXPRICE_API_KEY")),
-				"batching": map[string]any{"count": 1000, "period": "1s"},
-			}}},
-		}}}
+		"output": output,
 	}
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "# Rendered from collector %s v%d for %s. Do not edit; change the spec instead.\n",
-		c.ID, c.Version, in.Window.Start.Format("2006-01-02"))
+	if interval != "" {
+		fmt.Fprintf(&buf, "# Rendered from collector %s v%d; runs at %q (UTC) for the previous day.\n# Backfill a day: COLLECTOR_DAY=YYYY-MM-DD, or render it with --day. Do not edit; change the spec instead.\n", c.ID, c.Version, c.Trigger.Schedule)
+	} else {
+		fmt.Fprintf(&buf, "# Rendered from collector %s v%d for one day. Do not edit; change the spec instead.\n", c.ID, c.Version)
+	}
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(conf); err != nil {
@@ -140,159 +121,78 @@ func render(in RenderInput, withOutput bool) (string, error) {
 	return buf.String(), nil
 }
 
-func sourceHeaders(in RenderInput) map[string]any {
-	h := map[string]any{"Content-Type": "application/x-www-form-urlencoded"}
-	for k, v := range in.Source.Headers {
-		h[k] = v
-	}
-	if in.Source.AuthType == "bearer" {
-		h["Authorization"] = "Bearer " + secretOr(in.Credentials.SourceSecret, secretEnv(in.Source, "PROMETHEUS_TOKEN"))
-	}
-	return h
-}
-
-func secretOr(v, env string) string {
-	if v != "" {
-		return v
-	}
-	return "${" + env + "}"
-}
-
-// secretEnv is the variable an exported config reads a secret from: the
-// connection's own secret_env when it has one.
-func secretEnv(c spec.Connection, fallback string) string {
-	if c.SecretEnv != "" {
-		return c.SecretEnv
-	}
-	return fallback
-}
-
-const responseMapping = `root = if this.status != "success" {
-  throw("Prometheus query failed: " + this.error.or("unknown error"))
-} else if this.data.resultType != "vector" {
-  throw("Expected an instant vector, got " + this.data.resultType.string())
-} else if this.warnings.or([]).length() > 0 {
-  throw("Prometheus returned warnings, usage may be partial: " + this.warnings.join("; "))
-} else { this.data.result }
-`
-
-// eventMapping builds the Bloblang that turns one Prometheus series into one
+// eventMapping turns one normalized row ({labels, value, at}) into one
 // Flexprice event. Every user value is embedded as a JSON string literal.
-func eventMapping(in RenderInput) (string, error) {
-	c := in.Collector
+func eventMapping(c spec.Collector) (string, error) {
 	m := c.Mapping
-	start, end := in.Window.Start, in.Window.End
-	ts := start
-	if m.Timestamp == spec.TimestampWindowEnd {
-		ts = end
-	}
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
 
-	w(`let labels = this.metric.or({})`)
-	w(`let raw = this.value.index(1).string()`)
+	w(`let labels = this.labels.or({})`)
+	w(`let raw = this.value.string()`)
 	if m.Customer.From == spec.CustomerLabel {
-		skip, err := jsonLiteral(append([]string{}, m.Customer.Skip...))
+		skip, err := blobl.Literal(append([]string{}, m.Customer.Skip...))
 		if err != nil {
 			return "", err
 		}
-		w(`let key = $labels.get(%s).or("")`, quote(m.Customer.Label))
+		w(`let key = $labels.get(%s).or("")`, blobl.Quote(m.Customer.Label))
 		w(`let skip = %s.contains($key)`, skip)
 	} else {
 		w(`let skip = false`)
 	}
 	w(`let value = if $raw.re_match("^(NaN|[+-]?Inf)$") { if $skip { 0 } else { throw("Non-finite value " + $raw) } } else { $raw.number() }`)
 	w(`let _neg = if !$skip && $value < 0 { throw("Negative value " + $raw) }`)
-	w(`let _eval = if this.value.index(0).number() != %d { throw("Unexpected evaluation time " + this.value.index(0).string()) }`, in.EvalTime().Unix())
+	w(`let _eval = if @evaluated_at != null && this.at != @evaluated_at { throw("Unexpected evaluation time " + this.at.string()) }`)
 	for _, l := range m.RequiredLabels {
-		w(`let _req = if !$skip && $labels.get(%s).or("") == "" { throw(%s) }`, quote(l), quote("Missing required label "+l))
+		w(`let _req = if !$skip && $labels.get(%s).or("") == "" { throw(%s) }`, blobl.Quote(l), blobl.Quote("Missing required label "+l))
 	}
 	if c.Source.Mode == spec.ModeUsageDate {
-		day := start.Format("2006-01-02")
-		w(`let _day = if $labels.usage_date.or("") != %s { throw("usage_date " + $labels.usage_date.or("(missing)") + " is not " + %s) }`, quote(day), quote(day))
+		w(`let _day = if $labels.usage_date.or("") != @usage_date { throw("usage_date " + $labels.usage_date.or("(missing)") + " is not " + @usage_date) }`)
 	}
 	switch m.Customer.From {
 	case spec.CustomerStatic:
-		w(`let customer = %s`, quote(m.Customer.Value))
+		w(`let customer = %s`, blobl.Quote(m.Customer.Value))
 	case spec.CustomerLabel:
-		w(`let _key = if $key == "" { throw(%s) }`, quote("Missing customer label "+m.Customer.Label))
+		w(`let _key = if $key == "" { throw(%s) }`, blobl.Quote("Missing customer label "+m.Customer.Label))
 		if len(m.Customer.Lookup) > 0 {
-			lookup, err := jsonLiteral(m.Customer.Lookup)
+			lookup, err := blobl.Literal(m.Customer.Lookup)
 			if err != nil {
 				return "", err
 			}
-			w(`let customer = if $skip { "" } else { %s.get($key).or(throw("No customer mapped for " + %s + "=" + $key)) }`, lookup, quote(m.Customer.Label))
+			w(`let customer = if $skip { "" } else { %s.get($key).or(throw("No customer mapped for " + %s + "=" + $key)) }`, lookup, blobl.Quote(m.Customer.Label))
 		} else {
 			w(`let customer = $key`)
 		}
 	}
 	drop := append([]string{"__name__"}, m.DropLabels...)
-	w(`let kept = $labels.without(%s).map_each(p -> p.value.string())`, strings.Join(quoteAll(drop), ", "))
-	w(`let identity = [%s, %s, $customer, %s, 86400, %d, $labels.key_values().sort_by(p -> p.key)]`,
-		quote(c.ID), quote(m.EventName), quote(in.Query()), end.Unix())
+	w(`let kept = $labels.without(%s).map_each(p -> p.value.string())`, strings.Join(blobl.QuoteAll(drop), ", "))
+	// Same inputs give the same event_id, so re-runs and backfills are idempotent.
+	w(`let identity = [%s, %s, $customer, @query, 86400, @window_end_unix, $labels.key_values().sort_by(p -> p.key)]`,
+		blobl.Quote(c.ID), blobl.Quote(m.EventName))
 
-	props := map[string]string{
-		"unit":           m.Unit,
-		"window_seconds": "86400",
-		"window_start":   start.Format(time.RFC3339),
-		"window_end":     end.Format(time.RFC3339),
-	}
+	props := map[string]string{"unit": m.Unit, "window_seconds": "86400"}
 	for k, v := range m.Properties {
 		props[k] = v
 	}
 	if m.Unit == "" {
 		delete(props, "unit")
 	}
-	propsLit, err := jsonLiteral(props)
+	propsLit, err := blobl.Literal(props)
 	if err != nil {
 		return "", err
+	}
+	ts := "@window_start"
+	if m.Timestamp == spec.TimestampWindowEnd {
+		ts = "@window_end"
 	}
 	w(`meta collector_skip = if $skip { "true" }`)
 	w(`root = if $skip { {"skipped": $key} } else { {`)
 	w(`  "event_id": "col_" + $identity.string().hash("sha256").encode("hex").slice(0, 40),`)
-	w(`  "event_name": %s,`, quote(m.EventName))
+	w(`  "event_name": %s,`, blobl.Quote(m.EventName))
 	w(`  "external_customer_id": $customer,`)
-	w(`  "timestamp": %s,`, quote(ts.Format(time.RFC3339)))
-	w(`  "source": %s,`, quote(m.EventSource))
-	w(`  "properties": $kept.merge(%s).merge({"value": $raw})`, propsLit)
+	w(`  "timestamp": %s,`, ts)
+	w(`  "source": %s,`, blobl.Quote(m.EventSource))
+	w(`  "properties": $kept.merge(%s).merge({"window_start": @window_start, "window_end": @window_end, "value": $raw})`, propsLit)
 	w(`} }`)
 	return b.String(), nil
-}
-
-func quote(s string) string {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(s)
-	return strings.TrimSpace(buf.String())
-}
-
-func quoteAll(ss []string) []string {
-	out := make([]string, len(ss))
-	for i, s := range ss {
-		out[i] = quote(s)
-	}
-	return out
-}
-
-func jsonLiteral(v any) (string, error) {
-	if m, ok := v.(map[string]string); ok {
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := make([]string, len(keys))
-		for i, k := range keys {
-			parts[i] = quote(k) + ": " + quote(m[k])
-		}
-		return "{" + strings.Join(parts, ", ") + "}", nil
-	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(buf.String()), nil
 }

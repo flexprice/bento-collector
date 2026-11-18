@@ -3,7 +3,6 @@ package server
 
 import (
 	"github.com/flexprice/bento-collector/collector/engine"
-	"github.com/flexprice/bento-collector/collector/render"
 	"github.com/flexprice/bento-collector/collector/spec"
 	"github.com/flexprice/bento-collector/collector/store"
 	"github.com/flexprice/bento-collector/collector/web"
@@ -68,28 +67,13 @@ func (s *Server) listConnections(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
-	c, err := s.Engine.Connections.Get(r.PathValue("id"))
-	if err != nil {
+	if _, err := s.Engine.Connections.Get(r.PathValue("id")); err != nil {
 		writeErr(w, statusFor(err), err)
-		return
-	}
-	secret, err := s.Engine.Connections.Secret(c)
-	if err != nil {
-		writeJSONResp(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	var msg string
-	switch c.Type {
-	case spec.ConnectionPrometheus:
-		var v string
-		v, err = engine.PrometheusClient{HTTP: s.Engine.HTTP, Conn: c, Secret: secret}.Test(ctx)
-		msg = "Connected to Prometheus " + v
-	case spec.ConnectionFlexprice:
-		err = engine.FlexpriceClient{HTTP: s.Engine.HTTP, Conn: c, APIKey: secret}.Test(ctx)
-		msg = "Connected to Flexprice; the API key works"
-	}
+	msg, err := s.Engine.TestConnection(ctx, r.PathValue("id"))
 	if err != nil {
 		writeJSONResp(w, http.StatusOK, map[string]any{"ok": false, "message": err.Error()})
 		return
@@ -149,7 +133,7 @@ func (s *Server) saveCollector(w http.ResponseWriter, r *http.Request) {
 	c.ID = r.PathValue("id")
 	c.SavedBy = r.Header.Get("X-Collector-User")
 	c.Normalize()
-	if _, err := s.Engine.Resolve(c, spec.DayWindow(time.Now()), false); err != nil {
+	if err := s.Engine.Validate(c); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -194,18 +178,17 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	win, err := spec.ParseDay(req.Day, time.Now())
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
+	var day *spec.Window
+	if req.Day != "" {
+		win, err := spec.ParseDay(req.Day, time.Now())
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		day = &win
 	}
 	req.Collector.Normalize()
-	in, err := s.Engine.Resolve(req.Collector, win, false)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
-		return
-	}
-	y, err := render.RenderConfig(in)
+	y, err := s.Engine.Render(req.Collector, day)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return

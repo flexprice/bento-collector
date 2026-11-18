@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/flexprice/bento-collector/collector/internal/fixture"
+	"github.com/flexprice/bento-collector/collector/source"
+	"github.com/flexprice/bento-collector/collector/source/prometheus"
 )
 
 var testSecrets = map[string]string{"PROMETHEUS_TOKEN": "prom-token", "FLEXPRICE_API_KEY": "fp-key"}
@@ -101,7 +103,11 @@ func newTestEngine(t *testing.T, promURL, fpURL string) (*Engine, spec.Collector
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewEngine(st, conns), c
+	e, err := New(st, conns, source.NewRegistry(prometheus.Provider{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e, c
 }
 
 const threeTenants = `[

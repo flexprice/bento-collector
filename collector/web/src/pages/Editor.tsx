@@ -123,7 +123,7 @@ function SourceStep({ d, update, isNew }: StepProps & { isNew: boolean }) {
       <div className="grid grid-cols-2 gap-4">
         <Field label="Collector ID" hint="Lowercase; part of every event_id, so it cannot change later"><Input value={d.id} disabled={!isNew} placeholder="syncron-cpu-hours" onChange={(e) => update((n) => { n.id = e.target.value })} /></Field>
         <Field label="Display name"><Input value={d.name ?? ''} placeholder="Syncron reserved CPU core-hours" onChange={(e) => update((n) => { n.name = e.target.value })} /></Field>
-        <Field label="Prometheus connection"><Select value={d.source.connection} onChange={(e) => update((n) => { n.source.connection = e.target.value })} options={[['', 'Select…'], ...proms.map((c) => [c.id, `${c.id} · ${c.url}`] as [string, string])]} /></Field>
+        <Field label="Prometheus connection"><Select value={d.source.connection} onChange={(e) => update((n) => { n.source.connection = e.target.value; n.source.type = (connections.find((c) => c.id === e.target.value)?.type ?? n.source.type) as Collector['source']['type'] })} options={[['', 'Select…'], ...proms.map((c) => [c.id, `${c.id} · ${c.url}`] as [string, string])]} /></Field>
         <Field label="Query mode" hint={d.source.mode === 'usage_date' ? 'Use __USAGE_DATE__ in the query; rows must carry a matching usage_date label.' : 'Use [1d] ranges; evaluated at 00:00 UTC right after the day.'}>
           <Select value={d.source.mode} onChange={(e) => update((n) => { n.source.mode = e.target.value as Collector['source']['mode'] })} options={[['window', 'Daily window'], ['usage_date', 'Dated snapshot (usage_date)']]} />
         </Field>
@@ -247,11 +247,11 @@ function PreviewStep({ day, setDay, run, preview, stale }: { day: string; setDay
       ) : null}
       {rejects.length ? (
         <Section title="Rejected rows · not sent" flush>
-          <Table head={['Reason', 'Prometheus row']}>
+          <Table head={['Reason', 'Source row']}>
             {rejects.slice(0, 200).map((r, i) => (
               <Tr key={i}>
                 <Td><Badge tone="error">{r.error}</Badge></Td>
-                <Td mono className="break-all">{JSON.stringify(r.series?.metric)} → {r.series?.value?.[1]}</Td>
+                <Td mono className="break-all">{JSON.stringify(r.row?.labels ?? r.row?.metric ?? r.row)} → {r.row?.value?.toString()}</Td>
               </Tr>
             ))}
           </Table>
@@ -386,11 +386,11 @@ function Versions({ id, live, onRollback }: { id: string; live: number; onRollba
   )
 }
 
-function RenderedConfig({ draft, day }: { draft: Collector; day: string }) {
+function RenderedConfig({ draft }: { draft: Collector; day: string }) {
   const [y, setY] = useState<string>('')
-  useEffect(() => { api<{ yaml: string }>('POST', '/api/render', { collector: draft, day }).then((r) => setY(r.yaml)).catch((e) => setY(String(e.message))) }, [draft, day])
+  useEffect(() => { api<{ yaml: string }>('POST', '/api/render', { collector: draft }).then((r) => setY(r.yaml)).catch((e) => setY(String(e.message))) }, [draft])
   return (
-    <Section title="Rendered Bento config" description={`Generated from the spec for ${day}. Read-only; runs always render it fresh. Secrets appear as \${ENV} placeholders.`}>
+    <Section title="Rendered Bento config" description={`Runs on its own with bento-flexprice -c: every day at ${draft.trigger.schedule} UTC for the previous day (COLLECTOR_DAY=YYYY-MM-DD for a backfill). Read-only; secrets appear as \${ENV} placeholders.`}>
       {y ? <Code>{y}</Code> : <Spinner />}
     </Section>
   )

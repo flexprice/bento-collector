@@ -55,9 +55,6 @@ func LoadConnections(path string, getenv func(string) string) (*Connections, err
 		for k, v := range c.Headers {
 			c.Headers[k] = expand(v)
 		}
-		if c.AuthType == "" && c.Type == spec.ConnectionFlexprice {
-			c.AuthType = "api_key"
-		}
 		if c.SecretEnv != "" && getenv(c.SecretEnv) == "" {
 			missing[c.SecretEnv] = true
 		}

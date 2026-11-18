@@ -95,7 +95,7 @@ kind: CronJob
 metadata:
   name: collector-run
 spec:
-  schedule: "15 0 * * *"          # 00:15 UTC. This decides when collectors run; trigger.schedule in a spec is informational
+  schedule: "15 0 * * *"          # 00:15 UTC. With collector run, this decides when collectors run (trigger.schedule is used by rendered configs)
   timeZone: "Etc/UTC"
   concurrencyPolicy: Forbid
   jobTemplate:

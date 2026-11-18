@@ -51,7 +51,7 @@ export interface PreviewResult {
   query: string
   evaluated_at: string
   completeness?: { query: string; min: number; values: number[]; ok: boolean; error?: string }
-  rows: { series?: { metric: Record<string, string>; value: [number, string] }; event?: FlexEvent; error?: string }[]
+  rows: { row?: { labels?: Record<string, string>; metric?: Record<string, string>; value?: string | [number, string] }; event?: FlexEvent; error?: string }[]
   events: number
   rejected: number
   skipped: number
