@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { CheckIcon, ChevronRightIcon, HistoryIcon, PlayIcon, RotateCcwIcon, SaveIcon } from 'lucide-react'
+import { CheckIcon, ChevronRightIcon, HistoryIcon, PlayIcon, RotateCcwIcon, SaveIcon, XIcon } from 'lucide-react'
 import { useApp } from '@/App'
 import { api, canonical, cn, lineDiff, parseList, relTime, yesterday, type Collector, type PreviewResult } from '@/lib'
 import { Stepper, StepperDescription, StepperIndicator, StepperItem, StepperNav, StepperSeparator, StepperTitle, StepperTrigger } from '@/components/reui/stepper'
@@ -160,16 +160,16 @@ function MappingStep({ d, update }: StepProps) {
             <Field className="col-span-2" label="Label value → external_customer_id" group hint="No rows: the label value is the customer ID. Values not listed are rejected.">
               <KeyValueInput value={m.customer.lookup} keyLabel="Label value" valueLabel="external_customer_id" keyPlaceholder="trn_tQAAE7UDDQTNFS" valuePlaceholder="cust_acme" addLabel="Add mapping" onChange={(v) => update((n) => { n.mapping.customer.lookup = v })} />
             </Field>
-            <Field className="col-span-2" label="Label values not billed" hint="Internal or trial tenants: counted as skipped, so they do not fail the daily run.">
-              <ListInput value={m.customer.skip} placeholder="trn_internal, trn_trial" onChange={(v) => update((n) => { n.mapping.customer.skip = v })} />
+            <Field className="col-span-2" label="Label values not billed" group hint="Internal or trial tenants: counted as skipped, so they do not fail the daily run.">
+              <ListInput value={m.customer.skip} placeholder="Add a tenant, press Enter" onChange={(v) => update((n) => { n.mapping.customer.skip = v })} />
             </Field>
           </> : null}
         </div>
       </Section>
       <Section title="Labels and properties" description="Every label left on a row becomes an event property.">
         <div className="grid grid-cols-2 gap-4">
-          <Field label="Required labels" hint="Rows missing one are rejected"><ListInput value={m.required_labels} placeholder="instance" onChange={(v) => update((n) => { n.mapping.required_labels = v })} /></Field>
-          <Field label="Labels to drop"><ListInput value={m.drop_labels} onChange={(v) => update((n) => { n.mapping.drop_labels = v })} /></Field>
+          <Field label="Required labels" group hint="Rows missing one are rejected"><ListInput value={m.required_labels} placeholder="Add a label, press Enter" onChange={(v) => update((n) => { n.mapping.required_labels = v })} /></Field>
+          <Field label="Labels to drop" group><ListInput value={m.drop_labels} placeholder="Add a label, press Enter" onChange={(v) => update((n) => { n.mapping.drop_labels = v })} /></Field>
           <Field className="col-span-2" label="Extra properties" group hint="Fixed values added to every event"><KeyValueInput value={m.properties} keyLabel="Property" valueLabel="Value" keyPlaceholder="product" valuePlaceholder="dataops" addLabel="Add property" onChange={(v) => update((n) => { n.mapping.properties = v })} /></Field>
         </div>
       </Section>
@@ -261,11 +261,34 @@ function PreviewStep({ day, setDay, run, preview, stale }: { day: string; setDay
   )
 }
 
+// Chips: Enter, comma or blur adds; Backspace on an empty box removes the last; pasted lists are split.
 function ListInput({ value, onChange, placeholder }: { value?: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
-  const joined = (value ?? []).join(', ')
-  const [text, setText] = useState(joined)
-  useEffect(() => { if (parseList(text).join(', ') !== joined) setText(joined) }, [joined]) // eslint-disable-line react-hooks/exhaustive-deps
-  return <Input value={text} placeholder={placeholder} onChange={(e) => { setText(e.target.value); onChange(parseList(e.target.value)) }} />
+  const items = value ?? []
+  const [text, setText] = useState('')
+  const add = (raw: string) => {
+    const next = [...items]
+    for (const x of parseList(raw)) if (!next.includes(x)) next.push(x)
+    if (next.length !== items.length) onChange(next)
+    setText('')
+  }
+  return (
+    <div className="border-input focus-within:border-ring focus-within:ring-ring/50 flex min-h-8 w-full flex-wrap items-center gap-1 rounded-lg border px-1.5 py-1 focus-within:ring-3">
+      {items.map((x) => (
+        <Badge key={x} className="gap-0.5 pr-0.5 font-mono">
+          {x}
+          <button type="button" aria-label={`Remove ${x}`} className="hover:bg-foreground/10 rounded-sm p-0.5" onClick={() => onChange(items.filter((y) => y !== x))}><XIcon className="size-3" aria-hidden /></button>
+        </Badge>
+      ))}
+      <input className="placeholder:text-muted-foreground min-w-24 flex-1 bg-transparent px-1 text-sm outline-none" value={text} spellCheck={false}
+        placeholder={items.length ? '' : placeholder} aria-label={placeholder}
+        onChange={(e) => { if (e.target.value.includes(',')) add(e.target.value); else setText(e.target.value) }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); add(text) }
+          else if (e.key === 'Backspace' && !text && items.length) onChange(items.slice(0, -1))
+        }}
+        onBlur={() => text.trim() && add(text)} />
+    </div>
+  )
 }
 
 function DiffView({ before, after }: { before: string; after: string }) {
