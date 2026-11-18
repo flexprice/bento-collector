@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { CableIcon, DatabaseIcon, PencilIcon, PlugZapIcon, ReceiptIcon, XIcon } from 'lucide-react'
 import { useApp } from '@/App'
-import { api, formatKV, parseKV, relTime, type Connection } from '@/lib'
-import { Alert, Badge, Button, Empty, Field, Input, PageHeader, Section, Select, Spinner, Textarea } from '@/components/ui'
+import { api, relTime, type Connection } from '@/lib'
+import { Alert, Badge, Button, Empty, Field, Input, KeyValueInput, PageHeader, Section, Select, Spinner } from '@/components/ui'
 
 const blank = (type: Connection['type']): Connection =>
   type === 'flexprice'
@@ -65,7 +65,6 @@ function ConnectionDialog({ initial, onClose }: { initial: Connection; onClose: 
   const { connections, reload, toast } = useApp()
   const [c, setC] = useState<Connection>(initial)
   const [secret, setSecret] = useState('')
-  const [headers, setHeaders] = useState(formatKV(initial.headers))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const isNew = !connections.some((x) => x.id === initial.id)
@@ -75,7 +74,7 @@ function ConnectionDialog({ initial, onClose }: { initial: Connection; onClose: 
     setBusy(true); setError('')
     try {
       const { has_secret: _h, updated_at: _u, ...payload } = c
-      await api('PUT', `/api/connections/${encodeURIComponent(c.id)}`, { ...payload, headers: parseKV(headers), ...(secret ? { secret } : {}) })
+      await api('PUT', `/api/connections/${encodeURIComponent(c.id)}`, { ...payload, ...(secret ? { secret } : {}) })
       await reload(); toast(`Connection ${c.id} saved`); onClose()
     } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
@@ -101,8 +100,8 @@ function ConnectionDialog({ initial, onClose }: { initial: Connection; onClose: 
               <Input type="password" autoComplete="new-password" value={secret} placeholder={initial.has_secret ? '••••••••' : ''} onChange={(e) => setSecret(e.target.value)} />
             </Field>
           ) : null}
-          <Field label="Extra headers" hint={isProm ? 'One per line, e.g. X-Scope-OrgID = tenant-a. No credentials.' : 'One per line, e.g. x-environment-id = <id> for self-hosted Flexprice.'}>
-            <Textarea className="min-h-16" value={headers} onChange={(e) => setHeaders(e.target.value)} />
+          <Field label="Extra headers" group hint={isProm ? 'e.g. X-Scope-OrgID for a multi-tenant Prometheus. No credentials.' : 'e.g. x-environment-id for self-hosted Flexprice.'}>
+            <KeyValueInput value={c.headers} keyLabel="Header" valueLabel="Value" keyPlaceholder={isProm ? 'X-Scope-OrgID' : 'x-environment-id'} valuePlaceholder={isProm ? 'tenant-a' : '<environment id>'} addLabel="Add header" onChange={(v) => set({ headers: v })} />
           </Field>
           {error ? <Alert level="error">{error}</Alert> : null}
         </div>

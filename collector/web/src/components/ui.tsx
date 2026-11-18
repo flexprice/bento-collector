@@ -1,5 +1,5 @@
-import { forwardRef, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
-import { CheckCircle2Icon, CircleAlertIcon, InfoIcon, TriangleAlertIcon } from 'lucide-react'
+import { forwardRef, useEffect, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
+import { CheckCircle2Icon, CircleAlertIcon, InfoIcon, PlusIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
 import { cn } from '@/lib'
 import { Input as PInput } from '@/components/primitives/input'
 import { Textarea as PTextarea } from '@/components/primitives/textarea'
@@ -9,7 +9,8 @@ import { Badge as ReuiBadge } from '@/components/reui/badge'
 import { Alert as ReuiAlert, AlertDescription, AlertTitle } from '@/components/reui/alert'
 
 // Mirrors the Flexprice console kit (portal packages/ui): shadcn base-nova sizes, tokens only.
-export { Button } from '@/components/primitives/button'
+import { Button } from '@/components/primitives/button'
+export { Button }
 
 const control = 'w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-sm transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:bg-muted disabled:opacity-60 aria-invalid:border-destructive'
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(({ className, ...p }, ref) => <PInput ref={ref} className={className} {...p} />)
@@ -24,13 +25,15 @@ export function Select({ className, options, ...p }: SelectHTMLAttributes<HTMLSe
   )
 }
 
-export function Field({ label, hint, children, className, error }: { label: string; hint?: ReactNode; children: ReactNode; className?: string; error?: string }) {
+// group: several controls inside, so a <label> would be invalid and steal clicks.
+export function Field({ label, hint, children, className, error, group }: { label: string; hint?: ReactNode; children: ReactNode; className?: string; error?: string; group?: boolean }) {
+  const Tag = group ? 'div' : 'label'
   return (
-    <label className={cn('flex flex-col gap-1.5', className)}>
+    <Tag className={cn('flex flex-col gap-1.5', className)} {...(group ? { role: 'group', 'aria-label': label } : {})}>
       <span className="text-[13px] font-medium">{label}</span>
       {children}
       {error ? <span className="text-destructive text-xs">{error}</span> : hint ? <span className="text-muted-foreground text-xs leading-4">{hint}</span> : null}
-    </label>
+    </Tag>
   )
 }
 
@@ -133,4 +136,43 @@ export function Spinner({ className }: { className?: string }) {
 
 export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return <PSwitch aria-label={label} checked={checked} onCheckedChange={(v: boolean) => onChange(v)} />
+}
+
+type Pair = { k: string; v: string }
+const toPairs = (o?: Record<string, string>): Pair[] => Object.entries(o ?? {}).map(([k, v]) => ({ k, v }))
+const toRecord = (rows: Pair[]) => Object.fromEntries(rows.filter((r) => r.k.trim()).map((r) => [r.k.trim(), r.v.trim()]))
+const sameRecord = (a: Record<string, string>, b: Record<string, string>) => JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort())
+
+// Rows keep half-typed and blank entries locally; only rows with a key reach the parent.
+export function KeyValueInput({ value, onChange, keyLabel, valueLabel, keyPlaceholder, valuePlaceholder, addLabel = 'Add' }: {
+  value?: Record<string, string>; onChange: (v: Record<string, string>) => void
+  keyLabel: string; valueLabel: string; keyPlaceholder?: string; valuePlaceholder?: string; addLabel?: string
+}) {
+  const [rows, setRows] = useState<Pair[]>(() => toPairs(value))
+  useEffect(() => { if (!sameRecord(toRecord(rows), value ?? {})) setRows(toPairs(value)) }, [value]) // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (next: Pair[]) => { setRows(next); onChange(toRecord(next)) }
+  const keys = rows.map((r) => r.k.trim())
+  return (
+    <div className="flex flex-col gap-2">
+      {rows.length ? (
+        <div className="grid grid-cols-[1fr_1fr_auto] items-center gap-2">
+          <span className="text-muted-foreground text-xs">{keyLabel}</span>
+          <span className="text-muted-foreground text-xs">{valueLabel}</span>
+          <span />
+          {rows.map((r, i) => {
+            const dup = !!r.k.trim() && keys.indexOf(r.k.trim()) !== i
+            return [
+              <PInput key={`k${i}`} aria-label={`${keyLabel} ${i + 1}`} aria-invalid={dup || undefined} value={r.k} placeholder={keyPlaceholder} spellCheck={false}
+                onChange={(e) => set(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />,
+              <PInput key={`v${i}`} aria-label={`${valueLabel} ${i + 1}`} value={r.v} placeholder={valuePlaceholder} spellCheck={false}
+                onChange={(e) => set(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />,
+              <Button key={`x${i}`} variant="ghost" size="icon" aria-label={`Remove row ${i + 1}`} onClick={() => set(rows.filter((_, j) => j !== i))}><XIcon aria-hidden /></Button>,
+            ]
+          })}
+        </div>
+      ) : null}
+      {keys.some((k, i) => k && keys.indexOf(k) !== i) ? <p className="text-destructive text-xs">Duplicate {keyLabel.toLowerCase()}: only the last row is kept.</p> : null}
+      <div><Button variant="outline" size="sm" onClick={() => setRows([...rows, { k: '', v: '' }])}><PlusIcon aria-hidden />{addLabel}</Button></div>
+    </div>
+  )
 }

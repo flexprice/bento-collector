@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CheckIcon, ChevronRightIcon, HistoryIcon, PlayIcon, RotateCcwIcon, SaveIcon } from 'lucide-react'
 import { useApp } from '@/App'
-import { api, canonical, cn, formatKV, lineDiff, parseKV, parseList, relTime, yesterday, type Collector, type PreviewResult } from '@/lib'
+import { api, canonical, cn, lineDiff, parseList, relTime, yesterday, type Collector, type PreviewResult } from '@/lib'
 import { Stepper, StepperDescription, StepperIndicator, StepperItem, StepperNav, StepperSeparator, StepperTitle, StepperTrigger } from '@/components/reui/stepper'
-import { Alert, Badge, Button, Code, Empty, Field, Input, PageHeader, Section, Select, Spinner, Stat, Switch, Table, Td, Textarea, Tr } from '@/components/ui'
+import { Alert, Badge, Button, Code, Empty, Field, Input, KeyValueInput, PageHeader, Section, Select, Spinner, Stat, Switch, Table, Td, Textarea, Tr } from '@/components/ui'
 
 type Step = 'source' | 'mapping' | 'schedule' | 'preview' | 'save'
 const STEPS: [Step, string, string][] = [
@@ -138,8 +138,6 @@ function SourceStep({ d, update, isNew }: StepProps & { isNew: boolean }) {
 function MappingStep({ d, update }: StepProps) {
   const { connections } = useApp()
   const m = d.mapping
-  const [lookup, setLookup] = useState(formatKV(m.customer.lookup))
-  const [props, setProps] = useState(formatKV(m.properties))
   return (
     <>
       <Section title="Event" description="What each row becomes in Flexprice.">
@@ -159,8 +157,8 @@ function MappingStep({ d, update }: StepProps) {
             ? <Field label="external_customer_id"><Input value={m.customer.value ?? ''} placeholder="cust_acme" onChange={(e) => update((n) => { n.mapping.customer.value = e.target.value })} /></Field>
             : <Field label="Label" hint="Must survive the query's by (…)"><Input value={m.customer.label ?? ''} placeholder="label_tags_syncron_com_sy_tenant" onChange={(e) => update((n) => { n.mapping.customer.label = e.target.value })} /></Field>}
           {m.customer.from === 'label' ? <>
-            <Field className="col-span-2" label="Label value → external_customer_id" hint="Empty: the label value is the customer ID. Values not listed are rejected.">
-              <Textarea value={lookup} placeholder="trn_tQAAE7UDDQTNFS = cust_acme" onChange={(e) => { setLookup(e.target.value); update((n) => { n.mapping.customer.lookup = parseKV(e.target.value) }) }} />
+            <Field className="col-span-2" label="Label value → external_customer_id" group hint="No rows: the label value is the customer ID. Values not listed are rejected.">
+              <KeyValueInput value={m.customer.lookup} keyLabel="Label value" valueLabel="external_customer_id" keyPlaceholder="trn_tQAAE7UDDQTNFS" valuePlaceholder="cust_acme" addLabel="Add mapping" onChange={(v) => update((n) => { n.mapping.customer.lookup = v })} />
             </Field>
             <Field className="col-span-2" label="Label values not billed" hint="Internal or trial tenants: counted as skipped, so they do not fail the daily run.">
               <ListInput value={m.customer.skip} placeholder="trn_internal, trn_trial" onChange={(v) => update((n) => { n.mapping.customer.skip = v })} />
@@ -172,7 +170,7 @@ function MappingStep({ d, update }: StepProps) {
         <div className="grid grid-cols-2 gap-4">
           <Field label="Required labels" hint="Rows missing one are rejected"><ListInput value={m.required_labels} placeholder="instance" onChange={(v) => update((n) => { n.mapping.required_labels = v })} /></Field>
           <Field label="Labels to drop"><ListInput value={m.drop_labels} onChange={(v) => update((n) => { n.mapping.drop_labels = v })} /></Field>
-          <Field className="col-span-2" label="Extra properties" hint="Fixed values added to every event, one per line"><Textarea value={props} placeholder="product = dataops" onChange={(e) => { setProps(e.target.value); update((n) => { n.mapping.properties = parseKV(e.target.value) }) }} /></Field>
+          <Field className="col-span-2" label="Extra properties" group hint="Fixed values added to every event"><KeyValueInput value={m.properties} keyLabel="Property" valueLabel="Value" keyPlaceholder="product" valuePlaceholder="dataops" addLabel="Add property" onChange={(v) => update((n) => { n.mapping.properties = v })} /></Field>
         </div>
       </Section>
     </>

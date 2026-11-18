@@ -82,11 +82,6 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
 
 export const yesterday = () => new Date(Date.now() - 86400000).toISOString().slice(0, 10)
 export const parseList = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean)
-export const parseKV = (s: string) =>
-  Object.fromEntries(
-    s.split('\n').map((l) => l.split('=')).filter((p) => p.length >= 2 && p[0].trim()).map((p) => [p[0].trim(), p.slice(1).join('=').trim()]),
-  )
-export const formatKV = (o?: Record<string, string>) => Object.entries(o ?? {}).map(([k, v]) => `${k} = ${v}`).join('\n')
 
 function sortKeys(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(sortKeys)
