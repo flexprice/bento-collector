@@ -53,11 +53,9 @@ type Provider interface {
 	// Test checks reachability and credentials and returns a short description.
 	Test(ctx context.Context, c Conn) (string, error)
 	Stages(in Input) (Stages, error)
-	// Gate returns processors that set meta collector_complete = true when
-	// the completeness query passes, for configs that run without the engine.
+	// Gate returns processors that evaluate the completeness query and set
+	// meta collector_complete (bool) and collector_completeness (the values).
 	Gate(in Input, cp spec.Completeness) ([]any, error)
-	// Values evaluates a query to numbers, for the completeness gate.
-	Values(ctx context.Context, c Conn, query string, at time.Time) ([]float64, error)
 }
 
 type Registry struct {

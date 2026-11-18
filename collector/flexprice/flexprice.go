@@ -1,5 +1,5 @@
 // Package flexprice is the collector's destination: the API client used for
-// checks and sending, and the Bento output for exported configs.
+// checks, and the Bento output for rendered configs.
 package flexprice
 
 import (
@@ -24,7 +24,7 @@ func ValidateConnection(c spec.Connection) error {
 	return nil
 }
 
-// Output is the Bento flexprice output for an exported config. Rejected rows
+// Output is the Bento flexprice output for a rendered config. Rejected rows
 // are logged and skipped rows dropped.
 func Output(c spec.Connection, apiKey, collectorID string) (map[string]any, error) {
 	u, err := url.Parse(c.URL)

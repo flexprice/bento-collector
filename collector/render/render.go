@@ -16,20 +16,34 @@ import (
 
 const rfc3339 = `"2006-01-02T15:04:05Z07:00"`
 
-// Pipeline is one window without an output; the engine attaches its own
-// consumer so preview and run use exactly this pipeline.
+// Pipeline is one window without an output; preview attaches its own consumer
+// so it sees exactly the rows a published config sends.
 func Pipeline(p source.Provider, in source.Input) (string, error) {
 	st, err := p.Stages(in)
 	if err != nil {
 		return "", err
 	}
-	return build(in.Collector, st, windowFixed(in), nil, map[string]any{"drop": map[string]any{}}, "1", "")
+	return build(in.Collector, st, windowFixed(in), nil, map[string]any{"drop": map[string]any{}}, 1, "")
 }
 
-// Standalone is a config that runs with plain `bento-flexprice -c`, gated by
-// the collector's completeness check and sending to output. With a window it
-// runs once for that day; without, it stays up and runs on trigger.schedule
-// for the day before (or COLLECTOR_DAY=YYYY-MM-DD).
+// Completeness is one window that only evaluates the completeness gate, so
+// preview reports the same verdict a published config acts on.
+func Completeness(p source.Provider, in source.Input, cp spec.Completeness) (string, error) {
+	gate, err := p.Gate(in, cp)
+	if err != nil {
+		return "", err
+	}
+	return encode("", map[string]any{
+		"input":    generate(1, "", windowFixed(in)),
+		"pipeline": map[string]any{"threads": 1, "processors": gate},
+		"output":   map[string]any{"drop": map[string]any{}},
+	})
+}
+
+// Standalone is a Bento stream config gated by the collector's completeness
+// check and sending to output. Published, it runs in `bento-flexprice streams`
+// on trigger.schedule for the day before; with a window it runs once for that
+// day with plain `bento-flexprice -c` (a backfill).
 func Standalone(p source.Provider, in source.Input, output map[string]any, scheduled bool) (string, error) {
 	st, err := p.Stages(in)
 	if err != nil {
@@ -42,12 +56,23 @@ func Standalone(p source.Provider, in source.Input, output map[string]any, sched
 			return "", err
 		}
 		gate = append(g, map[string]any{"label": "completeness_gate", "mapping": fmt.Sprintf(
-			`root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below %v); nothing sent. Re-run with COLLECTOR_DAY=" + @usage_date + " once the data is complete.") } else { this }`, cp.Min)})
+			`root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below %v); nothing sent. Backfill it with render --day " + @usage_date + " once the data is complete.") } else { this }`, cp.Min)})
 	}
 	if !scheduled {
-		return build(in.Collector, st, windowFixed(in), gate, output, "1", "")
+		return build(in.Collector, st, windowFixed(in), gate, output, 1, "")
 	}
-	return build(in.Collector, st, windowScheduled(), gate, output, "0", "TZ=UTC "+in.Collector.Trigger.Schedule)
+	return build(in.Collector, st, windowScheduled(), gate, output, 0, "TZ=UTC "+in.Collector.Trigger.Schedule)
+}
+
+// generate triggers the pipeline. Nacked messages (rejected rows, a failed
+// gate) are not replayed: that would re-run the whole day in a loop.
+func generate(count int, interval, mapping string) map[string]any {
+	return map[string]any{"generate": map[string]any{
+		"count":             count,
+		"interval":          interval,
+		"mapping":           mapping,
+		"auto_replay_nacks": false,
+	}}
 }
 
 // The window mapping sets the metadata every later stage reads: window_start,
@@ -57,11 +82,8 @@ func windowFixed(in source.Input) string {
 }
 
 func windowScheduled() string {
-	return `let day = env("COLLECTOR_DAY").or("")
-let today = (now().ts_format("2006-01-02", "UTC") + "T00:00:00Z").ts_parse(` + rfc3339 + `).ts_unix()
-let start = if $day != "" { ($day + "T00:00:00Z").ts_parse(` + rfc3339 + `).ts_unix() } else { $today - 86400 }
+	return `let start = (now().ts_format("2006-01-02", "UTC") + "T00:00:00Z").ts_parse(` + rfc3339 + `).ts_unix() - 86400
 let now = now().ts_unix()
-let _open = if $start + 86400 > $now { throw("COLLECTOR_DAY " + $day + " has not finished in UTC") }
 ` + windowMeta
 }
 
@@ -73,7 +95,7 @@ meta now_unix = $now
 root = {}
 `
 
-func build(c spec.Collector, st source.Stages, window string, gate []any, output map[string]any, count, interval string) (string, error) {
+func build(c spec.Collector, st source.Stages, window string, gate []any, output map[string]any, count int, interval string) (string, error) {
 	if err := c.Validate(); err != nil {
 		return "", err
 	}
@@ -89,30 +111,25 @@ func build(c spec.Collector, st source.Stages, window string, gate []any, output
 		map[string]any{"label": "normalize_row", "mapping": st.Normalize},
 		map[string]any{"label": "flexprice_event", "mapping": mapping},
 	)
-	n := 1
-	if count == "0" {
-		n = 0
+	header := fmt.Sprintf("# Rendered from collector %s v%d for one day. Do not edit; change the spec instead.\n", c.ID, c.Version)
+	if interval != "" {
+		header = fmt.Sprintf("# Rendered from collector %s v%d; runs at %q (UTC) for the previous day.\n# Do not edit; change the spec and publish it instead.\n", c.ID, c.Version, c.Trigger.Schedule)
 	}
-	conf := map[string]any{
-		"http":   map[string]any{"enabled": false},
-		"logger": map[string]any{"level": "WARN", "format": "logfmt"},
-		"input": map[string]any{"generate": map[string]any{
-			"count":    n,
-			"interval": interval,
-			"mapping":  window,
-		}},
+	// Only stream fields (input, pipeline, output), so the same file runs in
+	// streams mode and with -c.
+	return encode(header, map[string]any{
+		"input": generate(count, interval, window),
 		"pipeline": map[string]any{
 			"threads":    1,
 			"processors": []any{map[string]any{"try": steps}},
 		},
 		"output": output,
-	}
+	})
+}
+
+func encode(header string, conf map[string]any) (string, error) {
 	var buf bytes.Buffer
-	if interval != "" {
-		fmt.Fprintf(&buf, "# Rendered from collector %s v%d; runs at %q (UTC) for the previous day.\n# Backfill a day: COLLECTOR_DAY=YYYY-MM-DD, or render it with --day. Do not edit; change the spec instead.\n", c.ID, c.Version, c.Trigger.Schedule)
-	} else {
-		fmt.Fprintf(&buf, "# Rendered from collector %s v%d for one day. Do not edit; change the spec instead.\n", c.ID, c.Version)
-	}
+	buf.WriteString(header)
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(conf); err != nil {

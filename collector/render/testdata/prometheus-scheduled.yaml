@@ -1,26 +1,19 @@
 # Rendered from collector syncron-cpu-hours v3; runs at "15 0 * * *" (UTC) for the previous day.
-# Backfill a day: COLLECTOR_DAY=YYYY-MM-DD, or render it with --day. Do not edit; change the spec instead.
-http:
-  enabled: false
+# Do not edit; change the spec and publish it instead.
 input:
   generate:
+    auto_replay_nacks: false
     count: 0
     interval: TZ=UTC 15 0 * * *
     mapping: |
-      let day = env("COLLECTOR_DAY").or("")
-      let today = (now().ts_format("2006-01-02", "UTC") + "T00:00:00Z").ts_parse("2006-01-02T15:04:05Z07:00").ts_unix()
-      let start = if $day != "" { ($day + "T00:00:00Z").ts_parse("2006-01-02T15:04:05Z07:00").ts_unix() } else { $today - 86400 }
+      let start = (now().ts_format("2006-01-02", "UTC") + "T00:00:00Z").ts_parse("2006-01-02T15:04:05Z07:00").ts_unix() - 86400
       let now = now().ts_unix()
-      let _open = if $start + 86400 > $now { throw("COLLECTOR_DAY " + $day + " has not finished in UTC") }
       meta window_start = $start.ts_format("2006-01-02T15:04:05Z07:00", "UTC")
       meta window_end = ($start + 86400).ts_format("2006-01-02T15:04:05Z07:00", "UTC")
       meta window_end_unix = $start + 86400
       meta usage_date = $start.ts_format("2006-01-02", "UTC")
       meta now_unix = $now
       root = {}
-logger:
-  format: logfmt
-  level: WARN
 output:
   switch:
     cases:
@@ -55,10 +48,12 @@ pipeline:
             result_map: |-
               let r = this.data.result.or([])
               let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
+              meta collector_completeness = $vals
+              meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this day" }
               meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= 0.999)
           label: completeness
         - label: completeness_gate
-          mapping: root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below 0.999); nothing sent. Re-run with COLLECTOR_DAY=" + @usage_date + " once the data is complete.") } else { this }
+          mapping: root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below 0.999); nothing sent. Backfill it with render --day " + @usage_date + " once the data is complete.") } else { this }
         - label: prometheus_request
           mapping: |-
             let q = "sum by (label_tags_syncron_com_sy_tenant, instance) (label_replace(sum_over_time(dp_dsi_pod_cpu_requests_cores[1d]), \"instance\", \"$1\", \"label_tags_syncron_com_dataops_data_service_instance\", \"(.*)\")) / 60".replace_all("__USAGE_DATE__", @usage_date)

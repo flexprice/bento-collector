@@ -1,5 +1,5 @@
-// Package store keeps versioned collector specs (files, optional git) and the
-// deployment's connections file.
+// Package store keeps versioned collector specs (files, optional git), the
+// published stream configs Bento runs, and the deployment's connections file.
 package store
 
 import (
@@ -20,31 +20,50 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
-// Store keeps versioned collector specs.
+// Store keeps versioned collector specs and which version is published.
 type Store interface {
 	ListCollectors() ([]spec.Collector, error)
 	GetCollector(id string, version int) (spec.Collector, error)
 	ListVersions(id string) ([]spec.Collector, error)
 	SaveCollector(c spec.Collector) (spec.Collector, error)
+	// Publish writes the rendered stream config Bento runs for the collector.
+	Publish(id string, version int, config, by string) (Published, error)
+	// Unpublish removes the stream config, so Bento stops the collector.
+	Unpublish(id string) error
+	// Published returns the published version, or ErrNotFound.
+	Published(id string) (Published, error)
 }
 
-// FileStore writes one JSON file per collector version:
+type Published struct {
+	Version     int       `json:"version"`
+	PublishedAt time.Time `json:"published_at"`
+	PublishedBy string    `json:"published_by,omitempty"`
+}
+
+// FileStore writes one JSON file per collector version and records the
+// published one; the published stream config goes to StreamsDir:
 //
 //	collectors/<id>/v0001.json
+//	collectors/<id>/published.json
+//	<StreamsDir>/<id>.yaml          read by bento-flexprice -w streams <StreamsDir>
 //
-// With Git set, every save is committed so the directory doubles as an audit log.
+// With Git set, every save and publish is committed so the directory doubles
+// as an audit log.
 type FileStore struct {
-	Dir string
-	Git bool
-	Now func() time.Time
-	mu  sync.Mutex
+	Dir        string
+	StreamsDir string
+	Git        bool
+	Now        func() time.Time
+	mu         sync.Mutex
 }
 
-func NewFileStore(dir string, git bool) (*FileStore, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "collectors"), 0o755); err != nil {
-		return nil, err
+func NewFileStore(dir, streamsDir string, git bool) (*FileStore, error) {
+	for _, d := range []string{filepath.Join(dir, "collectors"), streamsDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return nil, err
+		}
 	}
-	s := &FileStore{Dir: dir, Git: git, Now: time.Now}
+	s := &FileStore{Dir: dir, StreamsDir: streamsDir, Git: git, Now: time.Now}
 	if git {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); errors.Is(err, os.ErrNotExist) {
 			if err := s.git("init", "-q"); err != nil {
@@ -140,6 +159,59 @@ func (s *FileStore) SaveCollector(c spec.Collector) (spec.Collector, error) {
 	return c, s.commit(path, fmt.Sprintf("collector %s v%d", c.ID, c.Version))
 }
 
+// Publish replaces the collector's stream file atomically: Bento picks up the
+// rename and restarts the stream with the new version.
+func (s *FileStore) Publish(id string, version int, config, by string) (Published, error) {
+	p := Published{Version: version, PublishedBy: by}
+	if _, err := s.GetCollector(id, version); err != nil {
+		return p, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p.PublishedAt = s.Now().UTC()
+	if err := writeFile(s.streamPath(id), []byte(config)); err != nil {
+		return p, err
+	}
+	path := s.publishedPath(id)
+	if err := writeJSON(path, p); err != nil {
+		return p, err
+	}
+	return p, s.commit(path, fmt.Sprintf("publish collector %s v%d", id, version))
+}
+
+func (s *FileStore) Unpublish(id string) error {
+	if _, err := s.Published(id); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.Remove(s.streamPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	path := s.publishedPath(id)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return s.commit(path, fmt.Sprintf("unpublish collector %s", id))
+}
+
+func (s *FileStore) Published(id string) (Published, error) {
+	var p Published
+	if err := spec.ValidID(id); err != nil {
+		return p, err
+	}
+	err := readJSON(s.publishedPath(id), &p)
+	return p, err
+}
+
+func (s *FileStore) streamPath(id string) string {
+	return filepath.Join(s.StreamsDir, id+".yaml")
+}
+
+func (s *FileStore) publishedPath(id string) string {
+	return filepath.Join(s.Dir, "collectors", id, "published.json")
+}
+
 func (s *FileStore) versions(id string) ([]int, error) {
 	if err := spec.ValidID(id); err != nil {
 		return nil, err
@@ -171,7 +243,7 @@ func (s *FileStore) commit(path, msg string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.git("add", "--", rel); err != nil {
+	if err := s.git("add", "-A", "--", rel); err != nil {
 		return err
 	}
 	return s.git("-c", "user.name=flexprice-collector", "-c", "user.email=collector@flexprice.local",
@@ -203,8 +275,14 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
+	return writeFile(path, append(b, '\n'))
+}
+
+// writeFile replaces path atomically; the .tmp name is ignored by Bento's
+// streams watcher, which only reads .yaml files.
+func writeFile(path string, b []byte) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

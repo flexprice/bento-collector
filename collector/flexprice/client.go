@@ -14,8 +14,7 @@ import (
 	"strings"
 )
 
-// Client uses the public API only: lookups for validation and bulk
-// ingestion for sending.
+// Client uses the public API for checks only; the published Bento config sends.
 type Client struct {
 	HTTP   *http.Client
 	Conn   spec.Connection
@@ -93,15 +92,4 @@ func (f Client) MetersFor(ctx context.Context, eventName string) ([]string, erro
 		}
 	}
 	return ids, nil
-}
-
-// SendBulk posts events in chunks of 1000 and returns how many were accepted.
-func (f Client) SendBulk(ctx context.Context, events []map[string]any) (int, error) {
-	for i := 0; i < len(events); i += 1000 {
-		j := min(i+1000, len(events))
-		if _, err := f.do(ctx, http.MethodPost, "/v1/events/bulk", map[string]any{"events": events[i:j]}, nil); err != nil {
-			return i, err
-		}
-	}
-	return len(events), nil
 }

@@ -10,7 +10,7 @@ export function CollectorsPage() {
     <div>
       <PageHeader
         title="Collectors"
-        meta="Each collector queries Prometheus once per UTC day and sends one Flexprice event per result row."
+        meta="Each published collector runs in Bento once per UTC day and sends one Flexprice event per result row."
         actions={<Button onClick={() => go('#/collectors/new')} disabled={!hasConnections}><PlusIcon aria-hidden /> New collector</Button>}
       />
       <div className="px-8 pb-10">
@@ -23,7 +23,7 @@ export function CollectorsPage() {
               action={hasConnections ? null : <Button variant="outline" onClick={() => go('#/connections')}>Go to connections</Button>}
             />
           ) : (
-            <Table head={['Collector', 'Event', 'Customer from', 'Schedule', 'Checks', 'Version', 'Updated']}>
+            <Table head={['Collector', 'Event', 'Customer from', 'Schedule', 'Checks', 'Version', 'Running', 'Updated']}>
               {collectors.map((c) => (
                 <Tr key={c.id} onClick={() => go(`#/collectors/${c.id}`)}>
                   <Td>
@@ -39,6 +39,7 @@ export function CollectorsPage() {
                   <Td mono>{c.trigger.schedule} UTC</Td>
                   <Td>{c.trigger.completeness ? <Badge tone="success" dot>Completeness gate</Badge> : <Badge>No gate</Badge>}</Td>
                   <Td><Badge tone="info">v{c.version}</Badge></Td>
+                  <Td>{c.published ? <Badge tone="success" dot>v{c.published.version}</Badge> : <Badge>Not published</Badge>}</Td>
                   <Td className="text-muted-foreground whitespace-nowrap">{relTime(c.saved_at)}</Td>
                 </Tr>
               ))}

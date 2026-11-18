@@ -20,6 +20,7 @@ export interface Collector {
   version?: number
   saved_at?: string
   saved_by?: string
+  published?: Published
   source: { type: 'prometheus'; connection: string; query: string; mode: 'window' | 'usage_date' }
   trigger: { schedule: string; window: string; completeness?: { query: string; min: number } }
   mapping: {
@@ -33,6 +34,12 @@ export interface Collector {
     event_source?: string
   }
   destination: string
+}
+
+export interface Published {
+  version: number
+  published_at: string
+  published_by?: string
 }
 
 export interface FlexEvent {
@@ -76,9 +83,15 @@ function sortKeys(v: unknown): unknown {
   if (v && typeof v === 'object') return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys((v as Record<string, unknown>)[k])]))
   return v
 }
+// spec is the collector as the API accepts it: without the server-set published field.
+export function spec(c: Collector): Collector {
+  const { published: _p, ...rest } = c
+  return rest
+}
+
 export function canonical(c: Collector | null): string {
   if (!c) return ''
-  const { version: _v, saved_at: _s, saved_by: _b, ...rest } = c
+  const { version: _v, saved_at: _s, saved_by: _b, published: _p, ...rest } = c
   return JSON.stringify(sortKeys(rest), null, 2)
 }
 

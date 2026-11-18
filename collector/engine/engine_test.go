@@ -26,7 +26,6 @@ type fakeFlexprice struct {
 	mu        sync.Mutex
 	customers map[string]bool
 	meters    map[string]bool
-	received  []map[string]any
 }
 
 func (f *fakeFlexprice) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,14 +49,6 @@ func (f *fakeFlexprice) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Write([]byte(`{"items":[]}`))
-	case r.URL.Path == "/v1/events/bulk":
-		var body struct {
-			Events []map[string]any `json:"events"`
-		}
-		json.NewDecoder(r.Body).Decode(&body)
-		f.received = append(f.received, body.Events...)
-		w.WriteHeader(http.StatusAccepted)
-		w.Write([]byte(`{"message":"ok"}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -87,7 +78,7 @@ func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
 
 func newTestEngine(t *testing.T, promURL, fpURL string) (*Engine, spec.Collector) {
 	dir := t.TempDir()
-	st, err := store.NewFileStore(filepath.Join(dir, "data"), false)
+	st, err := store.NewFileStore(filepath.Join(dir, "data"), filepath.Join(dir, "streams"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,23 +108,42 @@ const threeTenants = `[
  {"metric":{"label_tags_syncron_com_sy_tenant":"trn_acme"},"value":[TS,"3"]}
 ]`
 
-func TestRunScenarios(t *testing.T) {
+func TestPreviewScenarios(t *testing.T) {
 	day := spec.DayWindow(time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC))
+	known := map[string]bool{"cust_acme": true, "cust_globex": true}
+	meter := map[string]bool{"syncron_cpu_hours": true}
 
-	t.Run("sends valid rows and rejects the rest", func(t *testing.T) {
-		fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}}
-		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "1", threeTenants)
-		defer fps.Close()
-		defer prom.Close()
+	preview := func(t *testing.T, fp *fakeFlexprice, completeness string, edit func(*spec.Collector)) *Result {
+		t.Helper()
+		fps, prom := httptest.NewServer(fp), fakePrometheus(t, completeness, threeTenants)
+		t.Cleanup(fps.Close)
+		t.Cleanup(prom.Close)
 		e, c := newTestEngine(t, prom.URL, fps.URL)
-		res, err := e.Run(context.Background(), c, day, false)
+		if edit != nil {
+			edit(&c)
+		}
+		res, err := e.Preview(context.Background(), c, day)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.Sent != 2 || res.Rejected != 2 || res.OK {
-			t.Fatalf("sent=%d rejected=%d ok=%v checks=%v", res.Sent, res.Rejected, res.OK, res.Checks)
+		return res
+	}
+	events := func(res *Result) []map[string]any {
+		var out []map[string]any
+		for _, r := range res.Rows {
+			if r.Error == "" {
+				out = append(out, r.Event)
+			}
 		}
-		ev := fp.received[0]
+		return out
+	}
+
+	t.Run("maps valid rows and rejects the rest", func(t *testing.T) {
+		res := preview(t, &fakeFlexprice{customers: known, meters: meter}, "1", nil)
+		if res.Events != 2 || res.Rejected != 2 || res.OK || !res.Completeness.OK {
+			t.Fatalf("events=%d rejected=%d ok=%v checks=%v", res.Events, res.Rejected, res.OK, res.Checks)
+		}
+		ev := events(res)[0]
 		if ev["timestamp"] != "2026-11-16T00:00:00Z" || ev["external_customer_id"] != "cust_acme" {
 			t.Fatalf("unexpected event %v", ev)
 		}
@@ -141,103 +151,69 @@ func TestRunScenarios(t *testing.T) {
 		if props["value"] != "48" || props["unit"] != "core_hours" || props["product"] != "dataops" || props["instance"] != "dsi_a" {
 			t.Fatalf("unexpected properties %v", props)
 		}
-		again, _ := e.Run(context.Background(), c, day, false)
-		_ = again
-		if fp.received[2]["event_id"] != fp.received[0]["event_id"] {
-			t.Fatal("a re-run must produce the same event_id")
+		again := preview(t, &fakeFlexprice{customers: known, meters: meter}, "1", nil)
+		if events(again)[0]["event_id"] != ev["event_id"] {
+			t.Fatal("the same day must produce the same event_id")
 		}
 	})
 
 	t.Run("skipped tenants are counted, not rejected", func(t *testing.T) {
-		fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}}
-		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "1", threeTenants)
-		defer fps.Close()
-		defer prom.Close()
-		e, c := newTestEngine(t, prom.URL, fps.URL)
-		c.Mapping.Customer.Skip = []string{"trn_newco"}
-		res, err := e.Run(context.Background(), c, day, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Skipped != 1 || res.Rejected != 1 || res.Sent != 2 {
-			t.Fatalf("skipped=%d rejected=%d sent=%d", res.Skipped, res.Rejected, res.Sent)
+		res := preview(t, &fakeFlexprice{customers: known, meters: meter}, "1", func(c *spec.Collector) { c.Mapping.Customer.Skip = []string{"trn_newco"} })
+		if res.Skipped != 1 || res.Rejected != 1 || res.Events != 2 {
+			t.Fatalf("skipped=%d rejected=%d events=%d", res.Skipped, res.Rejected, res.Events)
 		}
 	})
 
-	t.Run("incomplete day sends nothing", func(t *testing.T) {
-		fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}}
-		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "0.95", threeTenants)
-		defer fps.Close()
-		defer prom.Close()
-		e, c := newTestEngine(t, prom.URL, fps.URL)
-		res, err := e.Run(context.Background(), c, day, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Sent != 0 || res.OK || len(fp.received) != 0 {
-			t.Fatalf("incomplete day must not send: %+v", res.Checks)
+	t.Run("incomplete day is blocked by the rendered gate", func(t *testing.T) {
+		for _, v := range []string{"0.95", "NaN"} {
+			res := preview(t, &fakeFlexprice{customers: known, meters: meter}, v, nil)
+			if res.OK || res.Completeness.OK {
+				t.Fatalf("completeness %s must not pass: %+v", v, res.Completeness)
+			}
 		}
 	})
 
-	t.Run("missing meter sends nothing", func(t *testing.T) {
-		fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{}}
-		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "1", threeTenants)
-		defer fps.Close()
-		defer prom.Close()
-		e, c := newTestEngine(t, prom.URL, fps.URL)
-		res, err := e.Run(context.Background(), c, day, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Sent != 0 || len(fp.received) != 0 {
-			t.Fatal("missing meter must not send")
+	t.Run("missing meter blocks", func(t *testing.T) {
+		if res := preview(t, &fakeFlexprice{customers: known, meters: map[string]bool{}}, "1", nil); res.OK {
+			t.Fatal("missing meter must block")
 		}
 	})
 
-	t.Run("preview never sends", func(t *testing.T) {
-		fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}}
-		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "1", threeTenants)
-		defer fps.Close()
-		defer prom.Close()
-		e, c := newTestEngine(t, prom.URL, fps.URL)
-		res, err := e.Preview(context.Background(), c, day)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Events != 2 || len(fp.received) != 0 {
-			t.Fatalf("events=%d received=%d", res.Events, len(fp.received))
-		}
-	})
-
-	t.Run("bad prometheus credentials fail the run", func(t *testing.T) {
-		fp := &fakeFlexprice{customers: map[string]bool{}, meters: map[string]bool{"syncron_cpu_hours": true}}
-		fps, prom := httptest.NewServer(fp), fakePrometheus(t, "1", threeTenants)
-		defer fps.Close()
-		defer prom.Close()
+	t.Run("bad prometheus credentials fail", func(t *testing.T) {
 		testSecrets["PROMETHEUS_TOKEN"] = "wrong"
 		defer func() { testSecrets["PROMETHEUS_TOKEN"] = "prom-token" }()
-		e, c := newTestEngine(t, prom.URL, fps.URL)
-		res, err := e.Run(context.Background(), c, day, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.OK || res.Sent != 0 {
+		res := preview(t, &fakeFlexprice{customers: map[string]bool{}, meters: meter}, "1", nil)
+		if res.OK || res.Completeness.Error == "" {
 			t.Fatalf("expected failure, got %+v", res.Checks)
 		}
 	})
 }
 
-func TestCompletenessNaNFails(t *testing.T) {
-	fp := &fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}}
-	fps, prom := httptest.NewServer(fp), fakePrometheus(t, "NaN", threeTenants)
-	defer fps.Close()
+func TestPublishChecks(t *testing.T) {
+	prom := fakePrometheus(t, "1", threeTenants)
 	defer prom.Close()
-	e, c := newTestEngine(t, prom.URL, fps.URL)
-	res, err := e.Run(context.Background(), c, spec.DayWindow(time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Sent != 0 || res.OK {
-		t.Fatal("a NaN completeness value must not pass")
+	for name, tc := range map[string]struct {
+		customers, meters map[string]bool
+		blocked           bool
+	}{
+		"all customers and the meter exist": {map[string]bool{"cust_acme": true, "cust_globex": true}, map[string]bool{"syncron_cpu_hours": true}, false},
+		"a mapped customer is missing":      {map[string]bool{"cust_acme": true}, map[string]bool{"syncron_cpu_hours": true}, true},
+		"no meter":                          {map[string]bool{"cust_acme": true, "cust_globex": true}, map[string]bool{}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fps := httptest.NewServer(&fakeFlexprice{customers: tc.customers, meters: tc.meters})
+			defer fps.Close()
+			e, c := newTestEngine(t, prom.URL, fps.URL)
+			y, checks, err := e.Publish(context.Background(), c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if Blocked(checks) != tc.blocked {
+				t.Fatalf("blocked=%v checks=%v", Blocked(checks), checks)
+			}
+			if !strings.Contains(y, "TZ=UTC 15 0 * * *") || !strings.Contains(y, "${FLEXPRICE_API_KEY}") {
+				t.Fatalf("publish must render the scheduled config with env placeholders:\n%s", y)
+			}
+		})
 	}
 }

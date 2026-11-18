@@ -1,5 +1,6 @@
-# Self-hosted collector next to Prometheus: the UI/API (Deployment) and a daily
-# run of every saved collector (CronJob). Both share the spec volume.
+# Self-hosted collector next to Prometheus: one pod with the UI/API, which
+# manages and publishes collector configs, and plain Bento in streams mode,
+# which runs every published collector on its schedule. They share the volume.
 #
 # Connections are owned by this deployment (ConfigMap below); the UI only manages
 # collectors. Credentials come from your Secret as environment variables:
@@ -76,6 +77,20 @@ spec:
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: connections, mountPath: /config, readOnly: true }
+        # Runs one stream per published collector (/data/streams/<id>.yaml) and
+        # applies publish, rollback and unpublish without a restart.
+        - name: bento
+          image: ghcr.io/flexprice/bento-collector:latest
+          command: ["/bin/sh", "-c", "mkdir -p /data/streams && exec /app/bento-flexprice -w streams --no-api /data/streams"]
+          env:
+            - name: PROMETHEUS_PASSWORD
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+            - name: FLEXPRICE_API_KEY
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
+          ports: [{ containerPort: 4195 }]
+          livenessProbe: { httpGet: { path: /ping, port: 4195 } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: collector-data }
@@ -89,42 +104,3 @@ metadata:
 spec:
   selector: { app: collector-ui }
   ports: [{ port: 8090, targetPort: 8090 }]
----
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: collector-run
-spec:
-  schedule: "15 0 * * *"          # 00:15 UTC. With collector run, this decides when collectors run (trigger.schedule is used by rendered configs)
-  timeZone: "Etc/UTC"
-  concurrencyPolicy: Forbid
-  jobTemplate:
-    spec:
-      backoffLimit: 3             # exit 1 (incomplete day, rejects, outage) retries, then the Job fails -> alert on it
-      template:
-        spec:
-          restartPolicy: Never
-          securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
-          affinity:               # a ReadWriteOnce volume must be on the UI pod's node
-            podAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-                - labelSelector: { matchLabels: { app: collector-ui } }
-                  topologyKey: kubernetes.io/hostname
-          containers:
-            - name: collector
-              image: ghcr.io/flexprice/bento-collector:latest
-              args: ["collector", "run", "--all"]
-              env:
-                - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
-                - name: PROMETHEUS_PASSWORD
-                  valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
-                - name: FLEXPRICE_API_KEY
-                  valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
-              volumeMounts:
-                - { name: data, mountPath: /data, readOnly: true }
-                - { name: connections, mountPath: /config, readOnly: true }
-          volumes:
-            - name: data
-              persistentVolumeClaim: { claimName: collector-data }
-            - name: connections
-              configMap: { name: collector-connections }

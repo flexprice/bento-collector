@@ -33,6 +33,8 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("PUT /api/collectors/{id}", s.saveCollector)
 	api.HandleFunc("GET /api/collectors/{id}/versions", s.listVersions)
 	api.HandleFunc("GET /api/collectors/{id}/versions/{version}", s.getVersion)
+	api.HandleFunc("POST /api/collectors/{id}/publish", s.publish)
+	api.HandleFunc("DELETE /api/collectors/{id}/publish", s.unpublish)
 	api.HandleFunc("POST /api/preview", s.preview)
 	api.HandleFunc("POST /api/render", s.render)
 	mux.Handle("/api/", api)
@@ -81,16 +83,41 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": msg})
 }
 
+// collectorView is the latest version plus which version Bento runs.
+type collectorView struct {
+	spec.Collector
+	Published *store.Published `json:"published,omitempty"`
+}
+
+func (s *Server) view(c spec.Collector) (collectorView, error) {
+	v := collectorView{Collector: c}
+	p, err := s.Store.Published(c.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return v, nil
+	}
+	if err != nil {
+		return v, err
+	}
+	v.Published = &p
+	return v, nil
+}
+
 func (s *Server) listCollectors(w http.ResponseWriter, _ *http.Request) {
 	cs, err := s.Store.ListCollectors()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if cs == nil {
-		cs = []spec.Collector{}
+	out := make([]collectorView, 0, len(cs))
+	for _, c := range cs {
+		v, err := s.view(c)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		out = append(out, v)
 	}
-	writeJSONResp(w, http.StatusOK, cs)
+	writeJSONResp(w, http.StatusOK, out)
 }
 
 func (s *Server) getCollector(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +126,62 @@ func (s *Server) getCollector(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err)
 		return
 	}
-	writeJSONResp(w, http.StatusOK, c)
+	v, err := s.view(c)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, v)
+}
+
+type publishRequest struct {
+	// Version to publish; 0 means the latest.
+	Version int `json:"version"`
+}
+
+// publish checks Flexprice and writes the version's stream config; Bento
+// starts running it on its schedule. Publishing an older version rolls back.
+func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
+	var req publishRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	c, err := s.Store.GetCollector(r.PathValue("id"), req.Version)
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	config, checks, err := s.Engine.Publish(ctx, c)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if engine.Blocked(checks) {
+		var msgs []string
+		for _, ch := range checks {
+			if ch.Level == "error" {
+				msgs = append(msgs, ch.Message)
+			}
+		}
+		writeJSONResp(w, http.StatusConflict, map[string]any{"error": "Not published: " + strings.Join(msgs, " "), "checks": checks})
+		return
+	}
+	p, err := s.Store.Publish(c.ID, c.Version, config, r.Header.Get("X-Collector-User"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"published": p, "checks": checks})
+}
+
+func (s *Server) unpublish(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.Unpublish(r.PathValue("id")); err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) getVersion(w http.ResponseWriter, r *http.Request) {

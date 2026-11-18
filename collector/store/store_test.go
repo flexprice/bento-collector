@@ -1,6 +1,7 @@
 package store
 
 import (
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -8,7 +9,8 @@ import (
 )
 
 func TestStoreVersions(t *testing.T) {
-	st, err := NewFileStore(t.TempDir(), false)
+	dir := t.TempDir()
+	st, err := NewFileStore(filepath.Join(dir, "data"), filepath.Join(dir, "streams"), false)
 	if err != nil {
 		t.Fatal(err)
 	}

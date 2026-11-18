@@ -1,5 +1,6 @@
-// Package engine previews and runs collectors for one usage window: completeness
-// gate, the rendered Bento pipeline, Flexprice validation, then bulk send.
+// Package engine previews collectors for one usage window (completeness gate,
+// the rendered Bento pipeline, Flexprice checks) and renders the stream config
+// that Bento runs once a version is published. It never sends events.
 package engine
 
 import (
@@ -12,9 +13,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -72,7 +75,7 @@ type CompletenessResult struct {
 	Error  string    `json:"error,omitempty"`
 }
 
-// Result is the outcome of a preview or a run for one window.
+// Result is the outcome of a preview for one window.
 type Result struct {
 	Collector    string              `json:"collector"`
 	Version      int                 `json:"version"`
@@ -84,32 +87,30 @@ type Result struct {
 	Events       int                 `json:"events"`
 	Rejected     int                 `json:"rejected"`
 	Skipped      int                 `json:"skipped"`
-	Sent         int                 `json:"sent"`
 	Checks       []Check             `json:"checks"`
-	DryRun       bool                `json:"dry_run"`
 	OK           bool                `json:"ok"`
 	StartedAt    time.Time           `json:"started_at"`
 	FinishedAt   time.Time           `json:"finished_at"`
-	noSend       bool
 }
 
-func (r *Result) check(level, format string, args ...any) {
-	r.Checks = append(r.Checks, Check{Level: level, Message: fmt.Sprintf(format, args...)})
+type checks []Check
+
+func (cs *checks) add(level, format string, args ...any) {
+	*cs = append(*cs, Check{Level: level, Message: fmt.Sprintf(format, args...)})
 }
 
-// block records an error that stops the whole run from sending.
-func (r *Result) block(format string, args ...any) {
-	r.noSend = true
-	r.check("error", format, args...)
-}
-
-func (r *Result) blocked() bool {
-	for _, c := range r.Checks {
+// Blocked reports whether any check is an error.
+func Blocked(cs []Check) bool {
+	for _, c := range cs {
 		if c.Level == "error" {
 			return true
 		}
 	}
 	return false
+}
+
+func (r *Result) check(level, format string, args ...any) {
+	(*checks)(&r.Checks).add(level, format, args...)
 }
 
 // plan is a collector bound to its provider, connections and secrets.
@@ -173,8 +174,8 @@ func (e *Engine) Validate(c spec.Collector) error {
 	return err
 }
 
-// Render returns a config for plain `bento-flexprice -c`: scheduled on
-// trigger.schedule when day is nil, otherwise one run for that day.
+// Render returns the stream config: scheduled on trigger.schedule when day is
+// nil (what Publish writes), otherwise one run for that day (a backfill).
 func (e *Engine) Render(c spec.Collector, day *spec.Window) (string, error) {
 	w := spec.DayWindow(e.Now().Add(-24 * time.Hour))
 	if day != nil {
@@ -218,21 +219,11 @@ func (e *Engine) flexprice(c spec.Connection, key string) flexprice.Client {
 	return flexprice.Client{HTTP: e.HTTP, Conn: c, APIKey: key}
 }
 
-// Preview runs the collector for a window and validates the events without sending.
+// Preview runs the collector for a window and validates the events without
+// sending: the completeness gate, the rendered pipeline, meter and customers.
 func (e *Engine) Preview(ctx context.Context, c spec.Collector, w spec.Window) (*Result, error) {
-	return e.execute(ctx, c, w, true)
-}
-
-// Run executes the collector and sends valid events. Rows that fail mapping or
-// reference unknown customers are reported and not sent; a failed completeness
-// check, query or missing meter sends nothing.
-func (e *Engine) Run(ctx context.Context, c spec.Collector, w spec.Window, dryRun bool) (*Result, error) {
-	return e.execute(ctx, c, w, dryRun)
-}
-
-func (e *Engine) execute(ctx context.Context, c spec.Collector, w spec.Window, dryRun bool) (*Result, error) {
 	c.Normalize()
-	res := &Result{Collector: c.ID, Version: c.Version, Window: w, DryRun: dryRun, StartedAt: e.Now().UTC(), Rows: []Row{}, Checks: []Check{}}
+	res := &Result{Collector: c.ID, Version: c.Version, Window: w, StartedAt: e.Now().UTC(), Rows: []Row{}, Checks: []Check{}}
 	defer func() { res.FinishedAt = e.Now().UTC() }()
 	pl, err := e.resolve(c, w, true)
 	if err != nil {
@@ -246,12 +237,14 @@ func (e *Engine) execute(ctx context.Context, c spec.Collector, w spec.Window, d
 	res.EvaluatedAt = st.EvaluatedAt
 
 	if cp := c.Trigger.Completeness; cp != nil {
-		res.Completeness = e.completeness(ctx, pl, *cp)
+		if res.Completeness, err = e.completeness(ctx, pl, *cp); err != nil {
+			return nil, err
+		}
 		if !res.Completeness.OK {
 			if res.Completeness.Error != "" {
-				res.block("Completeness check failed: %s", res.Completeness.Error)
+				res.check("error", "Completeness check failed: %s", res.Completeness.Error)
 			} else {
-				res.block("Day is not fully measured (completeness %v, need ≥ %v). Nothing will be sent; re-run once the data is complete.", res.Completeness.Values, cp.Min)
+				res.check("error", "Day is not fully measured (completeness %v, need ≥ %v). A published config sends nothing for this day.", res.Completeness.Values, cp.Min)
 			}
 		}
 	}
@@ -270,19 +263,11 @@ func (e *Engine) execute(ctx context.Context, c spec.Collector, w spec.Window, d
 		res.check("ok", "%d row(s) skipped: label values listed as not billed", skipped)
 	}
 	for _, qe := range queryErrs {
-		res.block("Query failed: %s", qe)
+		res.check("error", "Query failed: %s", qe)
 	}
 
 	fp := e.flexprice(pl.dest, pl.destKey)
-	meters, err := fp.MetersFor(ctx, c.Mapping.EventName)
-	switch {
-	case err != nil:
-		res.block("Could not check meters in Flexprice: %v", err)
-	case len(meters) == 0:
-		res.block("No Flexprice meter uses event_name %q. Events would be stored but never billed.", c.Mapping.EventName)
-	default:
-		res.check("ok", "Meter found for %q (%d)", c.Mapping.EventName, len(meters))
-	}
+	(*checks)(&res.Checks).meter(ctx, fp, c.Mapping.EventName)
 	e.checkCustomers(ctx, fp, res)
 
 	for _, r := range res.Rows {
@@ -296,45 +281,129 @@ func (e *Engine) execute(ctx context.Context, c spec.Collector, w spec.Window, d
 		res.check("warning", "The query returned no rows: zero usage, a wrong tenant or data older than retention.")
 	}
 	if res.Rejected > 0 {
-		res.check("error", "%d row(s) rejected and not sent; fix the mapping or data and re-run this day.", res.Rejected)
+		res.check("error", "%d row(s) would be rejected and not sent; fix the mapping or data.", res.Rejected)
 	}
-
-	if !dryRun && !res.noSend {
-		events := make([]map[string]any, 0, res.Events)
-		for _, r := range res.Rows {
-			if r.Error == "" {
-				events = append(events, r.Event)
-			}
-		}
-		sent, err := fp.SendBulk(ctx, events)
-		res.Sent = sent
-		if err != nil {
-			res.block("Sending to Flexprice failed after %d of %d events (re-running is safe): %v", sent, len(events), err)
-		}
-	}
-	res.OK = !res.blocked()
+	res.OK = !Blocked(res.Checks)
 	return res, nil
 }
 
-func (e *Engine) completeness(ctx context.Context, pl plan, cp spec.Completeness) *CompletenessResult {
-	out := &CompletenessResult{Query: cp.Query, Min: cp.Min, Values: []float64{}}
-	values, err := pl.provider.Values(ctx, source.Conn{Connection: pl.in.Conn, Secret: pl.in.Secret, HTTP: e.HTTP}, cp.Query, pl.in.Window.End)
+// Publish renders the scheduled stream config for a saved version after
+// checking Flexprice: the meter must exist and so must every customer the
+// spec names. Any error check means the config must not be published.
+func (e *Engine) Publish(ctx context.Context, c spec.Collector) (string, []Check, error) {
+	c.Normalize()
+	y, err := e.Render(c, nil)
 	if err != nil {
-		out.Error = err.Error()
-		return out
+		return "", nil, err
 	}
-	if len(values) == 0 {
-		out.Error = "the completeness query returned no data for this day"
-		return out
+	pl, err := e.resolve(c, spec.DayWindow(e.Now()), true)
+	if err != nil {
+		return "", nil, err
 	}
-	out.OK = true
-	for _, v := range values {
-		out.Values = append(out.Values, v)
-		if !(v >= cp.Min) { // NaN never passes
-			out.OK = false
+	fp := e.flexprice(pl.dest, pl.destKey)
+	cs := checks{}
+	cs.meter(ctx, fp, c.Mapping.EventName)
+	ids := specCustomers(c)
+	if c.Mapping.Customer.From == spec.CustomerLabel && len(c.Mapping.Customer.Lookup) == 0 {
+		cs.add("warning", "Customers come straight from label %s, so they are only checked in preview.", c.Mapping.Customer.Label)
+	}
+	var missing []string
+	for _, id := range ids {
+		ok, err := fp.CustomerExists(ctx, id)
+		if err != nil {
+			cs.add("error", "Could not check customer %q in Flexprice: %v", id, err)
+			return y, cs, nil
+		}
+		if !ok {
+			missing = append(missing, id)
 		}
 	}
-	return out
+	if len(missing) > 0 {
+		cs.add("error", "These customers do not exist in Flexprice: %v. Create them or fix the customer mapping, then publish.", missing)
+	} else if len(ids) > 0 {
+		cs.add("ok", "All %d customer(s) exist in Flexprice", len(ids))
+	}
+	return y, cs, nil
+}
+
+// specCustomers are the customer ids the spec names: the static value or the
+// lookup table's targets.
+func specCustomers(c spec.Collector) []string {
+	if c.Mapping.Customer.From == spec.CustomerStatic {
+		return []string{c.Mapping.Customer.Value}
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, id := range c.Mapping.Customer.Lookup {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (cs *checks) meter(ctx context.Context, fp flexprice.Client, eventName string) {
+	meters, err := fp.MetersFor(ctx, eventName)
+	switch {
+	case err != nil:
+		cs.add("error", "Could not check meters in Flexprice: %v", err)
+	case len(meters) == 0:
+		cs.add("error", "No Flexprice meter uses event_name %q. Events would be stored but never billed.", eventName)
+	default:
+		cs.add("ok", "Meter found for %q (%d)", eventName, len(meters))
+	}
+}
+
+// completeness runs the rendered gate on its own, so preview shows the verdict
+// a published config acts on.
+func (e *Engine) completeness(ctx context.Context, pl plan, cp spec.Completeness) (*CompletenessResult, error) {
+	out := &CompletenessResult{Query: cp.Query, Min: cp.Min, Values: []float64{}}
+	conf, err := render.Completeness(pl.provider, pl.in, cp)
+	if err != nil {
+		return nil, err
+	}
+	sb := service.NewStreamBuilder()
+	if err := sb.SetYAML(conf); err != nil {
+		return nil, fmt.Errorf("rendered completeness config is invalid: %w", err)
+	}
+	if err := sb.AddConsumerFunc(func(_ context.Context, msg *service.Message) error {
+		if err := msg.GetError(); err != nil {
+			out.Error = assignmentPrefix.ReplaceAllString(err.Error(), "")
+			return nil
+		}
+		ok, _ := msg.MetaGetMut("collector_complete")
+		out.OK = ok == true
+		if v, _ := msg.MetaGetMut("collector_completeness_error"); v != nil {
+			out.Error = fmt.Sprint(v)
+		}
+		vals, _ := msg.MetaGetMut("collector_completeness")
+		list, _ := vals.([]any)
+		for _, v := range list {
+			f, err := strconv.ParseFloat(fmt.Sprint(v), 64)
+			if err != nil {
+				f = math.NaN()
+			}
+			out.Values = append(out.Values, f)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	stream, err := sb.Build()
+	if err != nil {
+		return nil, err
+	}
+	runCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if err := stream.Run(runCtx); err != nil && err != context.Canceled {
+		return nil, err
+	}
+	if out.Error != "" {
+		out.OK = false
+	}
+	return out, nil
 }
 
 func (e *Engine) checkCustomers(ctx context.Context, fp flexprice.Client, res *Result) {
@@ -349,7 +418,7 @@ func (e *Engine) checkCustomers(ctx context.Context, fp flexprice.Client, res *R
 		if !seen {
 			exists, err := fp.CustomerExists(ctx, id)
 			if err != nil {
-				res.block("Could not check customer %q in Flexprice: %v", id, err)
+				res.check("error", "Could not check customer %q in Flexprice: %v", id, err)
 				return
 			}
 			known[id], ok = exists, exists

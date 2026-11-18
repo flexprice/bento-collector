@@ -36,18 +36,6 @@ func (Provider) Test(ctx context.Context, c source.Conn) (string, error) {
 	return "Connected to Prometheus " + v, nil
 }
 
-func (Provider) Values(ctx context.Context, c source.Conn, query string, at time.Time) ([]float64, error) {
-	samples, err := client(c).Query(ctx, query, at)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]float64, len(samples))
-	for i, s := range samples {
-		out[i] = s.Value
-	}
-	return out, nil
-}
-
 // evalTime: window mode evaluates [1d] ranges at the window end; usage_date
 // queries select the day themselves and are evaluated now.
 func evalTime(in source.Input) time.Time {
@@ -88,6 +76,8 @@ func (Provider) Gate(in source.Input, cp spec.Completeness) ([]any, error) {
 		// Same rules as Client.Query: warnings fail; scalar or vector values must all reach Min (NaN never does).
 		"result_map": fmt.Sprintf(`let r = this.data.result.or([])
 let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
+meta collector_completeness = $vals
+meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this day" }
 meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= %v)`, cp.Min),
 	}}}, nil
 }

@@ -1,4 +1,4 @@
-// Package collector wires the `bento-flexprice collector` commands (serve, run, render).
+// Package collector wires the `bento-flexprice collector` commands (serve, render).
 package collector
 
 import (
@@ -10,7 +10,6 @@ import (
 	"github.com/flexprice/bento-collector/collector/store"
 
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,7 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -26,9 +25,10 @@ import (
 const usage = `Usage: bento-flexprice collector <command> [flags]
 
 Commands:
-  serve    Run the collector UI and API
-  run      Run collectors for one closed UTC day and send events to Flexprice
-  render   Print a Bento config that runs a collector with plain bento-flexprice (secrets as env placeholders)
+  serve    Run the collector UI and API; publishing writes stream configs for
+           bento-flexprice -w streams <streams dir>
+  render   Print a collector's stream config (secrets as env placeholders); with
+           --day, a one-off config for plain bento-flexprice -c (backfill)
 
 Run "bento-flexprice collector <command> -h" for flags.
 `
@@ -44,8 +44,6 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "serve":
 		err = serve(args[1:], stderr)
-	case "run":
-		code, err = run(args[1:], stdout, stderr)
 	case "render":
 		err = renderCmd(args[1:], stdout)
 	case "-h", "--help", "help":
@@ -64,12 +62,14 @@ func Main(args []string, stdout, stderr io.Writer) int {
 
 type commonFlags struct {
 	data        string
+	streams     string
 	git         bool
 	connections string
 }
 
 func (c *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.data, "data", envOr("COLLECTOR_DATA_DIR", "./collector-data"), "directory holding the versioned collector specs [COLLECTOR_DATA_DIR]")
+	fs.StringVar(&c.streams, "streams", os.Getenv("COLLECTOR_STREAMS_DIR"), "directory published stream configs are written to, watched by bento-flexprice -w streams (default <data>/streams) [COLLECTOR_STREAMS_DIR]")
 	fs.BoolVar(&c.git, "git", os.Getenv("COLLECTOR_GIT") == "true", "commit every save to a git repository in the data directory [COLLECTOR_GIT]")
 	fs.StringVar(&c.connections, "connections", os.Getenv("COLLECTOR_CONNECTIONS_FILE"), "YAML file of connections owned by the deployment; values may use ${ENV}, secrets come from secret_env [COLLECTOR_CONNECTIONS_FILE]")
 }
@@ -85,7 +85,11 @@ func (c *commonFlags) open() (store.Store, *engine.Engine, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	st, err := store.NewFileStore(c.data, c.git)
+	streams := c.streams
+	if streams == "" {
+		streams = filepath.Join(c.data, "streams")
+	}
+	st, err := store.NewFileStore(c.data, streams, c.git)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -125,94 +129,13 @@ func serve(args []string, stderr io.Writer) error {
 	return nil
 }
 
-type stringList []string
-
-func (s *stringList) String() string     { return strings.Join(*s, ",") }
-func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
-
-// run exits 0 when every collector succeeded, 1 when any failed or rejected
-// rows, so a CronJob or ECS task retries and alerts on it.
-func run(args []string, stdout, stderr io.Writer) (int, error) {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	var c commonFlags
-	c.register(fs)
-	var ids stringList
-	fs.Var(&ids, "collector", "collector id to run; repeat for several")
-	all := fs.Bool("all", false, "run every saved collector")
-	day := fs.String("day", "", "UTC day YYYY-MM-DD (default yesterday)")
-	from := fs.String("from", "", "inclusive start day for a backfill; runs every day from --from to --day")
-	dryRun := fs.Bool("dry-run", false, "query and validate, but do not send events")
-	if err := fs.Parse(args); err != nil {
-		return 2, err
-	}
-	st, eng, err := c.open()
-	if err != nil {
-		return 1, err
-	}
-	now := time.Now()
-	last, err := spec.ParseDay(*day, now)
-	if err != nil {
-		return 2, err
-	}
-	windows := []spec.Window{last}
-	if *from != "" {
-		first, err := spec.ParseDay(*from, now)
-		if err != nil {
-			return 2, err
-		}
-		if first.Start.After(last.Start) {
-			return 2, errors.New("--from must not be after --day")
-		}
-		windows = nil
-		for w := first; !w.Start.After(last.Start); w = spec.DayWindow(w.End) {
-			windows = append(windows, w)
-		}
-	}
-	var collectors []spec.Collector
-	if *all {
-		if collectors, err = st.ListCollectors(); err != nil {
-			return 1, err
-		}
-	}
-	for _, id := range ids {
-		col, err := st.GetCollector(id, 0)
-		if err != nil {
-			return 1, err
-		}
-		collectors = append(collectors, col)
-	}
-	if len(collectors) == 0 {
-		return 2, errors.New("nothing to run: pass --collector <id> or --all")
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	enc := json.NewEncoder(stdout)
-	code := 0
-	for _, col := range collectors {
-		for _, w := range windows {
-			res, err := eng.Run(ctx, col, w, *dryRun)
-			if err != nil {
-				fmt.Fprintf(stderr, "%s %s: %v\n", col.ID, w.Start.Format("2006-01-02"), err)
-				code = 1
-				continue
-			}
-			res.Rows = nil
-			_ = enc.Encode(res)
-			if !res.OK {
-				code = 1
-			}
-		}
-	}
-	return code, nil
-}
-
 func renderCmd(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("render", flag.ContinueOnError)
 	var c commonFlags
 	c.register(fs)
 	id := fs.String("collector", "", "collector id")
 	version := fs.Int("version", 0, "version (default latest)")
-	day := fs.String("day", "", "UTC day YYYY-MM-DD: one run for that day (default: a long-running config on trigger.schedule)")
+	day := fs.String("day", "", "UTC day YYYY-MM-DD: a one-off config for that day, for backfills (default: the scheduled stream config publish writes)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

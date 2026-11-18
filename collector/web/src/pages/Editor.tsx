@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { CheckIcon, ChevronRightIcon, HistoryIcon, PlayIcon, RotateCcwIcon, SaveIcon, XIcon } from 'lucide-react'
+import { CheckIcon, ChevronRightIcon, CircleStopIcon, HistoryIcon, PlayIcon, RocketIcon, RotateCcwIcon, SaveIcon, XIcon } from 'lucide-react'
 import { useApp } from '@/App'
-import { api, canonical, cn, lineDiff, parseList, relTime, yesterday, type Collector, type PreviewResult } from '@/lib'
+import { api, canonical, cn, lineDiff, parseList, relTime, spec, yesterday, type Collector, type PreviewResult } from '@/lib'
 import { Stepper, StepperDescription, StepperIndicator, StepperItem, StepperNav, StepperSeparator, StepperTitle, StepperTrigger } from '@/components/reui/stepper'
 import { Alert, Badge, Button, Code, Empty, Field, Input, KeyValueInput, PageHeader, Section, Select, Spinner, Stat, Switch, Table, Td, Textarea, Tr } from '@/components/ui'
 
@@ -45,36 +45,61 @@ export function CollectorEditor({ id }: { id: string | null }) {
   const update = (fn: (d: Collector) => void) => setDraft((d) => { const n = structuredClone(d!); fn(n); return n })
 
   const runPreview = async () => {
-    const r = await api<PreviewResult>('POST', '/api/preview', { collector: draft, day })
+    const r = await api<PreviewResult>('POST', '/api/preview', { collector: spec(draft), day })
     setPreview(r); setPreviewKey(canonical(draft))
   }
   const save = async () => {
-    const { version: _v, saved_at: _s, saved_by: _b, ...body } = draft
+    const { version: _v, saved_at: _s, saved_by: _b, ...body } = spec(draft)
     const s = await api<Collector>('PUT', `/api/collectors/${encodeURIComponent(draft.id)}`, body)
-    toast(`Saved ${s.id} as v${s.version}`)
+    toast(`Saved ${s.id} as v${s.version}. Publish it to run it.`)
     await reload()
     if (!id) { go(`#/collectors/${s.id}`); return }
+    s.published = saved?.published
     setSaved(s); setDraft(structuredClone(s)); setPreviewKey(canonical(s)); setView('versions')
   }
+  const refresh = async () => {
+    const c = await api<Collector>('GET', `/api/collectors/${saved!.id}`)
+    setSaved(c); await reload()
+  }
+  const publish = async (version: number) => {
+    try {
+      await api('POST', `/api/collectors/${saved!.id}/publish`, { version })
+      toast(`Published v${version}. Bento runs it at ${saved!.trigger.schedule} UTC.`)
+      await refresh()
+    } catch (e) { toast((e as Error).message, true) }
+  }
+  const unpublish = async () => {
+    if (!confirm(`Stop running ${saved!.id}? Bento removes its stream; versions are kept.`)) return
+    try {
+      await api('DELETE', `/api/collectors/${saved!.id}/publish`)
+      toast(`Unpublished ${saved!.id}`)
+      await refresh()
+    } catch (e) { toast((e as Error).message, true) }
+  }
+  const published = saved?.published
 
   return (
     <div>
       <PageHeader
         breadcrumb={<a href="#/collectors" className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs">Collectors <ChevronRightIcon className="size-3" /> {saved ? saved.id : 'New'}</a>}
-        title={<span className="flex items-center gap-2">{draft.name || draft.id || 'New collector'} {saved ? <Badge tone="info">v{saved.version}</Badge> : <Badge>Draft</Badge>}{dirty && saved ? <Badge tone="warning" dot>Unsaved changes</Badge> : null}</span>}
-        meta={saved ? `Live version saved ${relTime(saved.saved_at)} · runs ${saved.trigger.schedule} UTC` : 'Query Prometheus once per UTC day and turn each row into a Flexprice event.'}
+        title={<span className="flex items-center gap-2">{draft.name || draft.id || 'New collector'} {saved ? <Badge tone="info">v{saved.version}</Badge> : <Badge>Draft</Badge>}{saved ? (published ? <Badge tone="success" dot>Published v{published.version}</Badge> : <Badge>Not published</Badge>) : null}{dirty && saved ? <Badge tone="warning" dot>Unsaved changes</Badge> : null}</span>}
+        meta={saved ? (published ? `Bento runs v${published.version} at ${saved.trigger.schedule} UTC (published ${relTime(published.published_at)})` : `Latest v${saved.version} saved ${relTime(saved.saved_at)} · not running until published`) : 'Query Prometheus once per UTC day and turn each row into a Flexprice event.'}
         actions={saved ? (
-          <div className="bg-muted flex rounded-lg p-0.5">
-            {(['configure', 'versions', 'config'] as const).map((v) => (
-              <button key={v} onClick={() => setView(v)} className={cn('h-7 rounded-md px-3 text-[13px] capitalize', view === v ? 'bg-background font-medium shadow-xs' : 'text-muted-foreground')}>
-                {v === 'config' ? 'Rendered config' : v}
-              </button>
-            ))}
+          <div className="flex items-center gap-2">
+            {published?.version !== saved.version ? <Button size="sm" onClick={() => publish(saved.version!)}><RocketIcon aria-hidden /> Publish v{saved.version}</Button> : null}
+            {published ? <Button size="sm" variant="outline" onClick={unpublish}><CircleStopIcon aria-hidden /> Unpublish</Button> : null}
+            <div className="bg-muted flex rounded-lg p-0.5">
+              {(['configure', 'versions', 'config'] as const).map((v) => (
+                <button key={v} onClick={() => setView(v)} className={cn('h-7 rounded-md px-3 text-[13px] capitalize', view === v ? 'bg-background font-medium shadow-xs' : 'text-muted-foreground')}>
+                  {v === 'config' ? 'Rendered config' : v}
+                </button>
+              ))}
+            </div>
           </div>
         ) : null}
       />
       <div className="px-8 pb-10">
-        {view === 'versions' && saved ? <Versions id={saved.id} live={saved.version!} onRollback={(c) => { setDraft({ ...structuredClone(c), version: saved.version }); setView('configure'); setStep('preview'); toast(`Loaded v${c.version}. Preview it, then save to roll back.`) }} /> : null}
+        {view === 'versions' && saved ? <Versions id={saved.id} published={published?.version} onPublish={publish} onEdit={(c) => { setDraft({ ...structuredClone(c), version: saved.version, published }); setView('configure'); setStep('preview'); toast(`Loaded v${c.version} into the editor. Preview it, then save it as a new version.`) }} /> : null}
         {view === 'config' ? <RenderedConfig draft={draft} day={day} /> : null}
         {view === 'configure' ? (
           <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)_340px]">
@@ -183,7 +208,7 @@ function ScheduleStep({ d, update }: StepProps) {
     <>
       <Section title="Schedule" description="Runs one closed UTC day at a time.">
         <div className="grid grid-cols-2 gap-4">
-          <Field label="Expected schedule (cron, UTC)" hint="Your CronJob / ECS schedule starts runs; keep it in line. 15 0 * * * = 00:15 daily."><Input value={d.trigger.schedule} onChange={(e) => update((n) => { n.trigger.schedule = e.target.value })} /></Field>
+          <Field label="Schedule (cron, UTC)" hint="When Bento runs the published version, for the previous UTC day. 15 0 * * * = 00:15 daily."><Input value={d.trigger.schedule} onChange={(e) => update((n) => { n.trigger.schedule = e.target.value })} /></Field>
           <Field label="Window"><Input value="1 day (UTC midnight to midnight)" disabled /></Field>
         </div>
       </Section>
@@ -322,11 +347,11 @@ function SaveStep({ saved, draft, preview, onSave, goPreview }: { saved: Collect
           {!preview ? <Alert level="warning" title="Preview required">Run a preview of this exact version before saving. <Button variant="link" size="sm" onClick={goPreview}>Go to preview</Button></Alert> : null}
           {preview && !blocking ? <Alert level="ok" title={`Preview passed for ${preview.window.start.slice(0, 10)}`}>{preview.events} events, {preview.rejected} rejected, {preview.skipped} skipped.</Alert> : null}
           {preview && blocking ? <>
-            <Alert level="error" title="The last preview has errors">Saving now means the next run fails on the same day. Fix the mapping or data first.</Alert>
+            <Alert level="error" title="The last preview has errors">Published as is, this day would not be sent in full. Fix the mapping or data first.</Alert>
             <label className="flex items-center gap-2 text-[13px]"><input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} /> I understand, save anyway</label>
           </> : null}
           {error ? <Alert level="error">{error}</Alert> : null}
-          <p className="text-muted-foreground text-xs">Every save is a new immutable version (committed to git when enabled). The next scheduled run uses the latest version.</p>
+          <p className="text-muted-foreground text-xs">Every save is a new immutable version (committed to git when enabled). Saving does not change what runs: publish the version to hand it to Bento.</p>
         </div>
       </Section>
     </>
@@ -350,32 +375,38 @@ function EventPreviewPanel({ d, preview }: { d: Collector; preview: PreviewResul
       </Section>
       <Section title="How a run behaves">
         <ul className="text-muted-foreground flex list-disc flex-col gap-1.5 pl-4 text-xs leading-4">
-          <li>Incomplete day, query error or missing meter: nothing is sent, run fails.</li>
-          <li>Bad rows (negative, NaN, unknown customer): rejected; valid rows still sent; run fails so you get alerted.</li>
-          <li>Re-running a day sends identical event IDs; Flexprice does not double-bill.</li>
+          <li>Publishing is blocked if the meter or a mapped customer does not exist in Flexprice.</li>
+          <li>Incomplete day or query error: nothing is sent for that day; Bento logs the error.</li>
+          <li>Bad rows (negative, NaN, unmapped tenant): rejected and logged; valid rows still sent.</li>
+          <li>Backfilling a day sends identical event IDs; Flexprice does not double-bill.</li>
         </ul>
       </Section>
     </aside>
   )
 }
 
-function Versions({ id, live, onRollback }: { id: string; live: number; onRollback: (c: Collector) => void }) {
+function Versions({ id, published, onPublish, onEdit }: { id: string; published?: number; onPublish: (version: number) => Promise<void>; onEdit: (c: Collector) => void }) {
   const [vs, setVs] = useState<Collector[] | null>(null)
   const [open, setOpen] = useState<number | null>(null)
   useEffect(() => { api<Collector[]>('GET', `/api/collectors/${id}/versions`).then(setVs).catch(() => setVs([])) }, [id])
   if (!vs) return <div className="text-muted-foreground flex items-center gap-2 text-sm"><Spinner /> Loading versions…</div>
   return (
-    <Section title="Version history" description="Each save is immutable. Roll back by loading an older version, previewing it, and saving it as the newest." flush>
+    <Section title="Version history" description="Each save is immutable. Bento runs the published version; publish an older one to roll back." flush>
       {vs.length === 0 ? <Empty icon={<HistoryIcon />} title="No versions" /> : (
         <Table head={['Version', 'Saved', 'Event', 'Changes', '']}>
           {vs.map((v, i) => (
             <Fragment key={v.version}>
               <Tr>
-                <Td><span className="flex items-center gap-2 font-medium">v{v.version} {v.version === live ? <Badge tone="success" dot>Live</Badge> : null}</span></Td>
+                <Td><span className="flex items-center gap-2 font-medium">v{v.version} {v.version === published ? <Badge tone="success" dot>Published</Badge> : null}</span></Td>
                 <Td className="text-muted-foreground">{new Date(v.saved_at!).toLocaleString()}</Td>
                 <Td mono>{v.mapping.event_name}</Td>
                 <Td><Button variant="link" size="sm" onClick={() => setOpen(open === v.version ? null : v.version!)}>{open === v.version ? 'Hide diff' : i === vs.length - 1 ? 'Show initial spec' : `Diff vs v${vs[i + 1].version}`}</Button></Td>
-                <Td className="text-right">{v.version !== live ? <Button variant="outline" size="sm" onClick={() => onRollback(v)}><RotateCcwIcon aria-hidden /> Roll back to this</Button> : null}</Td>
+                <Td className="text-right">
+                  <span className="inline-flex gap-2">
+                    {i > 0 ? <Button variant="ghost" size="sm" onClick={() => onEdit(v)}><RotateCcwIcon aria-hidden /> Edit from this</Button> : null}
+                    {v.version !== published ? <Button variant="outline" size="sm" onClick={() => onPublish(v.version!)}><RocketIcon aria-hidden /> Publish</Button> : null}
+                  </span>
+                </Td>
               </Tr>
               {open === v.version ? <tr><td colSpan={5} className="px-4 pb-4"><DiffView before={canonical(vs[i + 1] ?? null)} after={canonical(v)} /></td></tr> : null}
             </Fragment>
@@ -388,9 +419,9 @@ function Versions({ id, live, onRollback }: { id: string; live: number; onRollba
 
 function RenderedConfig({ draft }: { draft: Collector; day: string }) {
   const [y, setY] = useState<string>('')
-  useEffect(() => { api<{ yaml: string }>('POST', '/api/render', { collector: draft }).then((r) => setY(r.yaml)).catch((e) => setY(String(e.message))) }, [draft])
+  useEffect(() => { api<{ yaml: string }>('POST', '/api/render', { collector: spec(draft) }).then((r) => setY(r.yaml)).catch((e) => setY(String(e.message))) }, [draft])
   return (
-    <Section title="Rendered Bento config" description={`Runs on its own with bento-flexprice -c: every day at ${draft.trigger.schedule} UTC for the previous day (COLLECTOR_DAY=YYYY-MM-DD for a backfill). Read-only; secrets appear as \${ENV} placeholders.`}>
+    <Section title="Rendered Bento config" description={`What Publish writes for bento-flexprice streams: every day at ${draft.trigger.schedule} UTC for the previous day. Backfill a day with collector render --day YYYY-MM-DD and bento-flexprice -c. Read-only; secrets appear as \${ENV} placeholders.`}>
       {y ? <Code>{y}</Code> : <Spinner />}
     </Section>
   )
