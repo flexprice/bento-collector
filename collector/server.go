@@ -41,8 +41,20 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/render", s.render)
 	mux.Handle("/api/", s.auth(api))
 	sub, _ := fs.Sub(uiFiles, "ui")
-	mux.Handle("/", http.FileServerFS(sub))
+	mux.Handle("/", uiCache(http.FileServerFS(sub)))
 	return securityHeaders(mux)
+}
+
+// Hashed assets never change; index.html must be revalidated so a new build is picked up.
+func uiCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
