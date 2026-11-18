@@ -100,7 +100,7 @@ With `--git`, the data dir is a git repo and every save is a commit, which gives
 export FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=…   # every compose command below needs them
 python3 examples/collector/syncron-sandbox/flexprice_setup.py   # Syncron customers and meters
 docker compose -f examples/collector/syncron-sandbox/docker-compose.yml up -d --build
-# UI: http://localhost:8090, token syncron-ui-token. Connections come from syncron-sandbox/connections.yaml:
+# UI: http://localhost:8090. Connections come from syncron-sandbox/connections.yaml:
 # Prometheus http://prometheus:9090 (basic auth), Flexprice $FLEXPRICE_URL (default http://host.docker.internal:8080).
 # Create and save at least one collector in the UI (e.g. CPU core-hours); a fresh sandbox has none,
 # so `run --all` would exit with "nothing to run".
@@ -112,7 +112,7 @@ docker compose -f examples/collector/syncron-sandbox/docker-compose.yml run --rm
 ```bash
 examples/collector/syncron-sandbox/up.sh                       # Prometheus on :9095 (needs bcrypt; uses local prometheus/promtool or Docker)
 FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=… python3 examples/collector/syncron-sandbox/flexprice_setup.py
-export COLLECTOR_UI_TOKEN=dev COLLECTOR_DATA_DIR=./collector-data \
+export COLLECTOR_DATA_DIR=./collector-data \
   COLLECTOR_CONNECTIONS_FILE=examples/collector/syncron-sandbox/connections.yaml \
   PROMETHEUS_URL=http://127.0.0.1:9095 PROMETHEUS_PASSWORD=syncron-secret \
   FLEXPRICE_URL=http://localhost:8080 FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=…

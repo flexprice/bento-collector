@@ -1,7 +1,7 @@
 # Whole Syncron demo on one machine: a Syncron-like Prometheus (basic auth, 7 days of
 # generated usage ending today) and the collector UI built from this repo.
 #   docker compose -f examples/collector/syncron-sandbox/docker-compose.yml up -d --build
-#   open http://localhost:8090 (token: syncron-ui-token)
+#   open http://localhost:8090
 # Connections come from connections.yaml. Set FLEXPRICE_API_KEY (and FLEXPRICE_URL /
 # FLEXPRICE_ENV_ID if not the local defaults) before `up`.
 # Run collected days by hand:
@@ -28,7 +28,6 @@ services:
     depends_on: [prometheus]
     environment:
       COLLECTOR_GIT: "true"
-      COLLECTOR_UI_TOKEN: ${COLLECTOR_UI_TOKEN:-syncron-ui-token}
       COLLECTOR_CONNECTIONS_FILE: /config/connections.yaml
       PROMETHEUS_URL: http://prometheus:9090
       PROMETHEUS_PASSWORD: syncron-secret

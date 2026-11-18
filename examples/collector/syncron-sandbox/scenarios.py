@@ -4,7 +4,6 @@ Needs the sandbox Prometheus (./up.sh), a Flexprice with the setup applied
 (flexprice_setup.py) and `bento-flexprice collector serve` running.
 
   COLLECTOR_URL     default http://127.0.0.1:8090
-  COLLECTOR_UI_TOKEN
   COLLECTOR_DATA_DIR / COLLECTOR_CONNECTIONS_FILE, PROMETHEUS_URL, PROMETHEUS_PASSWORD
                     same as the serve process, for CLI runs
   BENTO_FLEXPRICE   path to the binary
@@ -22,7 +21,6 @@ import urllib.error
 import urllib.request
 
 API = os.environ.get("COLLECTOR_URL", "http://127.0.0.1:8090")
-TOKEN = os.environ.get("COLLECTOR_UI_TOKEN", "")
 BIN = os.environ.get("BENTO_FLEXPRICE", "bento-flexprice")
 FP = os.environ.get("FLEXPRICE_URL", "http://localhost:8080")
 FP_KEY = os.environ["FLEXPRICE_API_KEY"]
@@ -49,7 +47,7 @@ def call(method, url, body=None, headers=None):
 
 
 def api(method, path, body=None):
-    return call(method, API + path, body, {"Authorization": "Bearer " + TOKEN})
+    return call(method, API + path, body, {})
 
 
 def fp(method, path, body=None):
