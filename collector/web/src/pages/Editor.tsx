@@ -163,15 +163,15 @@ function MappingStep({ d, update }: StepProps) {
               <Textarea value={lookup} placeholder="trn_tQAAE7UDDQTNFS = cust_acme" onChange={(e) => { setLookup(e.target.value); update((n) => { n.mapping.customer.lookup = parseKV(e.target.value) }) }} />
             </Field>
             <Field className="col-span-2" label="Label values not billed" hint="Internal or trial tenants: counted as skipped, so they do not fail the daily run.">
-              <Input value={(m.customer.skip ?? []).join(', ')} placeholder="trn_internal, trn_trial" onChange={(e) => update((n) => { n.mapping.customer.skip = parseList(e.target.value) })} />
+              <ListInput value={m.customer.skip} placeholder="trn_internal, trn_trial" onChange={(v) => update((n) => { n.mapping.customer.skip = v })} />
             </Field>
           </> : null}
         </div>
       </Section>
       <Section title="Labels and properties" description="Every label left on a row becomes an event property.">
         <div className="grid grid-cols-2 gap-4">
-          <Field label="Required labels" hint="Rows missing one are rejected"><Input value={(m.required_labels ?? []).join(', ')} placeholder="instance" onChange={(e) => update((n) => { n.mapping.required_labels = parseList(e.target.value) })} /></Field>
-          <Field label="Labels to drop"><Input value={(m.drop_labels ?? []).join(', ')} onChange={(e) => update((n) => { n.mapping.drop_labels = parseList(e.target.value) })} /></Field>
+          <Field label="Required labels" hint="Rows missing one are rejected"><ListInput value={m.required_labels} placeholder="instance" onChange={(v) => update((n) => { n.mapping.required_labels = v })} /></Field>
+          <Field label="Labels to drop"><ListInput value={m.drop_labels} onChange={(v) => update((n) => { n.mapping.drop_labels = v })} /></Field>
           <Field className="col-span-2" label="Extra properties" hint="Fixed values added to every event, one per line"><Textarea value={props} placeholder="product = dataops" onChange={(e) => { setProps(e.target.value); update((n) => { n.mapping.properties = parseKV(e.target.value) }) }} /></Field>
         </div>
       </Section>
@@ -261,6 +261,13 @@ function PreviewStep({ day, setDay, run, preview, stale }: { day: string; setDay
       ) : null}
     </>
   )
+}
+
+function ListInput({ value, onChange, placeholder }: { value?: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
+  const joined = (value ?? []).join(', ')
+  const [text, setText] = useState(joined)
+  useEffect(() => { if (parseList(text).join(', ') !== joined) setText(joined) }, [joined]) // eslint-disable-line react-hooks/exhaustive-deps
+  return <Input value={text} placeholder={placeholder} onChange={(e) => { setText(e.target.value); onChange(parseList(e.target.value)) }} />
 }
 
 function DiffView({ before, after }: { before: string; after: string }) {
