@@ -1,0 +1,3 @@
+# Demo-only basic auth for the compose sandbox: user syncron, password syncron-secret.
+basic_auth_users:
+  syncron: $2b$12$vW8g4x9BIXsZa1PlimrW8Of5SK5n89wZ/EigH6fjIFQcqy7wgpR7a

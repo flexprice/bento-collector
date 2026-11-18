@@ -1,0 +1,42 @@
+# Whole Syncron demo on one machine: a Syncron-like Prometheus (basic auth, 7 days of
+# generated usage ending today) and the collector UI built from this repo.
+#   docker compose -f examples/collector/syncron-sandbox/docker-compose.yml up -d --build
+#   open http://localhost:8090
+# Connections come from connections.yaml. Set FLEXPRICE_API_KEY (and FLEXPRICE_URL /
+# FLEXPRICE_ENV_ID if not the local defaults) before `up`.
+# Run collected days by hand:
+#   docker compose -f examples/collector/syncron-sandbox/docker-compose.yml run --rm --no-deps collector collector run --all
+services:
+  fixtures:
+    image: python:3.12-alpine
+    volumes: [".:/sandbox:ro", "prom-work:/work"]
+    entrypoint: ["sh", "-c", "rm -rf /work/* && mkdir -p /work/data && python /sandbox/fixtures.py > /work/metrics.om && chown -R 65534:65534 /work"]
+  blocks:
+    image: prom/prometheus:v3.5.1
+    depends_on: { fixtures: { condition: service_completed_successfully } }
+    volumes: ["prom-work:/work"]
+    entrypoint: ["/bin/promtool", "tsdb", "create-blocks-from", "openmetrics", "/work/metrics.om", "/work/data"]
+  prometheus:
+    image: prom/prometheus:v3.5.1
+    depends_on: { blocks: { condition: service_completed_successfully } }
+    volumes: ["prom-work:/work", "./web.yml:/etc/prometheus/web.yml:ro"]
+    entrypoint: ["sh", "-c", "echo 'scrape_configs: []' > /work/prometheus.yml && exec /bin/prometheus --config.file=/work/prometheus.yml --web.config.file=/etc/prometheus/web.yml --storage.tsdb.path=/work/data --storage.tsdb.retention.time=30d"]
+    ports: ["127.0.0.1:${PROM_PORT:-9095}:9090"]
+  collector:
+    build: { context: ../../.. }
+    command: ["collector", "serve", "--addr", ":8090"]
+    depends_on: [prometheus]
+    environment:
+      COLLECTOR_GIT: "true"
+      COLLECTOR_CONNECTIONS_FILE: /config/connections.yaml
+      PROMETHEUS_URL: http://prometheus:9090
+      PROMETHEUS_PASSWORD: syncron-secret
+      FLEXPRICE_URL: ${FLEXPRICE_URL:-http://host.docker.internal:8080}
+      FLEXPRICE_API_KEY: ${FLEXPRICE_API_KEY:?set FLEXPRICE_API_KEY}
+      FLEXPRICE_ENV_ID: ${FLEXPRICE_ENV_ID:-00000000-0000-0000-0000-000000000000}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports: ["127.0.0.1:${COLLECTOR_PORT:-8090}:8090"]
+    volumes: ["collector-data:/data", "./connections.yaml:/config/connections.yaml:ro"]
+volumes:
+  prom-work:
+  collector-data:
