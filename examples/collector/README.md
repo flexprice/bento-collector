@@ -58,6 +58,18 @@ With `--git`, the data dir is a git repo and every save is a commit, which gives
 
 [syncron-sandbox/](syncron-sandbox/) plays Syncron end to end with a real Prometheus (basic auth, 7 days of Syncron-shaped data with a metrics gap, a negative value and an unmapped tenant) and a local Flexprice.
 
+**One command** (Prometheus with the sandbox data plus the collector UI built from this repo):
+
+```bash
+docker compose -f examples/collector/syncron-sandbox/docker-compose.yml up -d --build
+# UI: http://localhost:8090, token syncron-ui-token
+# Prometheus connection: http://prometheus:9090, basic auth syncron / syncron-secret
+# Flexprice connection (local): http://host.docker.internal:8080
+docker compose -f examples/collector/syncron-sandbox/docker-compose.yml run --rm --no-deps collector collector run --all
+```
+
+**Without Docker Compose:**
+
 ```bash
 examples/collector/syncron-sandbox/up.sh                       # Prometheus on :9095 (needs bcrypt; uses local prometheus/promtool or Docker)
 FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=… python3 examples/collector/syncron-sandbox/flexprice_setup.py
@@ -65,6 +77,33 @@ COLLECTOR_UI_TOKEN=dev ./bento-flexprice collector serve --data ./collector-data
 COLLECTOR_UI_TOKEN=dev COLLECTOR_DATA_DIR=./collector-data BENTO_FLEXPRICE=./bento-flexprice \
   FLEXPRICE_API_KEY=… FLEXPRICE_ENV_ID=… python3 examples/collector/syncron-sandbox/scenarios.py
 ```
+
+## Check that Prometheus and Flexprice agree
+
+Compare one tenant and one closed UTC day. Run the collector's query in Prometheus at the end of the day, then ask Flexprice for the same meter, customer and day:
+
+```bash
+PROM=http://localhost:9095 FP=http://localhost:8080   # your Prometheus and Flexprice API
+FPH=(-H "x-api-key: $FLEXPRICE_API_KEY" -H "x-environment-id: $FLEXPRICE_ENV_ID")   # drop x-environment-id on Flexprice Cloud
+DAY=2026-11-16; END=$(date -u -d "$DAY + 1 day" +%s)
+# 1. Prometheus: the value the collector sends (sum over every series of that tenant)
+curl -s -u syncron:syncron-secret "$PROM/api/v1/query" --data-urlencode "time=$END" --data-urlencode \
+  'query=sum(sum_over_time(dp_dsi_pod_cpu_requests_cores{label_tags_syncron_com_sy_tenant="trn_tQAAE7UDDQTNFS"}[1d]) / 60)' \
+  | jq -r '.data.result[0].value[1]'
+# 2. Flexprice: usage for the meter whose event_name the collector sends
+METER=$(curl -s "$FP/v1/meters?limit=500" "${FPH[@]}" | jq -r '.items[] | select(.event_name=="syncron_cpu_hours") | .id')
+curl -s "$FP/v1/events/usage/meter" "${FPH[@]}" -H 'Content-Type: application/json' \
+  -d "{\"meter_id\":\"$METER\",\"external_customer_id\":\"cust_acme\",\"start_time\":\"${DAY}T00:00:00Z\",\"end_time\":\"$(date -u -d "$DAY + 1 day" +%F)T00:00:00Z\"}" \
+  | jq .value
+```
+
+The two numbers should be equal (sandbox: 168 for Acme). If they are not:
+
+- **Flexprice lower:** the run was blocked (completeness, missing meter) or rows were rejected; `collector run` prints both. Ingestion is asynchronous, so wait a minute before comparing.
+- **Flexprice higher:** the meter is COUNT instead of SUM of `properties.value`, or two collectors send the same `event_name` for overlapping data.
+- **Off by a day:** events are stamped at the window start by default; ask Flexprice for the same UTC day, not the next one.
+
+`scenarios.py` runs this check automatically for the sandbox.
 
 ## Not in this version
 
