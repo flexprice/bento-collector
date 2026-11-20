@@ -47,7 +47,7 @@ FROM alpine:${ALPINE_VERSION}
 
 # Upgrade OS packages to pick up libcrypto/libssl security fixes, then add
 # ca-certificates for HTTPS requests.
-RUN apk --no-cache upgrade && apk --no-cache add ca-certificates
+RUN apk --no-cache upgrade && apk --no-cache add ca-certificates git
 
 # Create non-root user
 RUN addgroup -g 1000 bento && \
@@ -63,11 +63,16 @@ COPY --from=builder --chown=bento:bento /build/examples /app/examples
 # internal/ holds prod pipelines referenced via -c /app/internal/...
 COPY --from=builder --chown=bento:bento /build/internal /app/internal
 
+# Collector UI: versioned specs in /data (optionally a git repo). Connections come
+# from COLLECTOR_CONNECTIONS_FILE and secrets from environment variables.
+RUN mkdir -p /data && chown bento:bento /data
+ENV COLLECTOR_DATA_DIR=/data
+
 # Switch to non-root user
 USER bento
 
-# Expose Bento HTTP server port
-EXPOSE 4195
+# Expose Bento HTTP server port and the collector UI
+EXPOSE 4195 8090
 
 # Set entrypoint
 ENTRYPOINT ["/app/bento-flexprice"]

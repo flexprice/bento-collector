@@ -1,0 +1,30 @@
+# Try the collector on one machine. Connections and credentials are owned by
+# this deployment: edit connections.yaml and put the secrets in .env
+# (PROMETHEUS_URL, PROMETHEUS_USER, PROMETHEUS_PASSWORD, FLEXPRICE_API_KEY). The UI manages
+# and publishes collectors and has no login, so it is bound to 127.0.0.1; Bento
+# runs every published collector.
+#   docker compose up -d
+# Backfill a day:
+#   docker compose run --rm -T collector-ui collector render --collector <id> --window 2026-11-07 > day.yaml
+#   docker compose run --rm -v "$PWD/day.yaml:/day.yaml:ro" collector-ui -c /day.yaml
+services:
+  collector-ui:
+    image: ghcr.io/flexprice/bento-collector:latest
+    command: ["collector", "serve", "--addr", ":8090"]
+    env_file: .env
+    environment:
+      COLLECTOR_GIT: "true"
+      COLLECTOR_CONNECTIONS_FILE: /config/connections.yaml
+    ports: ["127.0.0.1:8090:8090"]
+    volumes:
+      - collector-data:/data
+      - ./connections.yaml:/config/connections.yaml:ro
+  collector-bento:
+    image: ghcr.io/flexprice/bento-collector:latest
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /data/streams && exec /app/bento-flexprice -w streams --no-api /data/streams"]
+    env_file: .env
+    volumes:
+      - collector-data:/data
+    restart: unless-stopped
+volumes:
+  collector-data:

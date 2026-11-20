@@ -1,0 +1,107 @@
+# Rendered from collector syncron-cpu-hours v3; runs at "15 0 * * *" (UTC) for the last 1d window that closed 15m earlier.
+# Do not edit; change the spec and publish it instead.
+input:
+  generate:
+    auto_replay_nacks: false
+    count: 0
+    interval: TZ=UTC 15 0 * * *
+    mapping: |
+      let size = 86400
+      let now = now().ts_unix()
+      let start = (($now - 900) / $size).floor().int64() * $size - $size
+      meta window_start = $start.ts_format("2006-01-02T15:04:05Z07:00", "UTC")
+      meta window_end = ($start + $size).ts_format("2006-01-02T15:04:05Z07:00", "UTC")
+      meta window_start_unix = $start
+      meta window_end_unix = $start + $size
+      meta window_seconds = $size
+      meta window_length = "1d"
+      meta usage_date = $start.ts_format("2006-01-02", "UTC")
+      meta now_unix = $now
+      root = {}
+output:
+  switch:
+    cases:
+      - check: errored()
+        output:
+          reject: 'collector syncron-cpu-hours rejected a row: ${! error() }'
+      - output:
+          flexprice:
+            api_host: api.cloud.flexprice.io
+            api_key: ${FLEXPRICE_API_KEY}
+            batching:
+              count: 1000
+              period: 1s
+            scheme: https
+pipeline:
+  processors:
+    - try:
+        - branch:
+            processors:
+              - http:
+                  headers:
+                    Authorization: Bearer ${PROMETHEUS_TOKEN}
+                    Content-Type: application/x-www-form-urlencoded
+                  retries: 3
+                  timeout: 30s
+                  url: https://prometheus.syncron.internal/api/v1/query
+                  verb: POST
+            request_map: root = "query=" + "count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440".replace_all("__USAGE_DATE__", @usage_date).replace_all("__WINDOW__", @window_length).escape_url_query() + "&time=" + @window_end_unix.ts_format("2006-01-02T15:04:05Z07:00", "UTC").escape_url_query()
+            result_map: |-
+              let r = this.data.result.or([])
+              let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
+              meta collector_completeness = $vals
+              meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this window" }
+              meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= 0.999)
+          label: completeness
+        - label: completeness_gate
+          mapping: root = if @collector_complete != true { throw("Window " + @window_start + " is not fully measured (completeness below 0.999); nothing sent. Backfill it with render --window " + @window_start + " once the data is complete.") } else { this }
+        - label: prometheus_request
+          mapping: |-
+            let q = "sum by (label_tags_syncron_com_sy_tenant, instance) (label_replace(sum_over_time(dp_dsi_pod_cpu_requests_cores[1d]), \"instance\", \"$1\", \"label_tags_syncron_com_dataops_data_service_instance\", \"(.*)\")) / 60".replace_all("__USAGE_DATE__", @usage_date).replace_all("__WINDOW__", @window_length)
+            let at = @window_end_unix
+            meta query = $q
+            meta evaluated_at = $at
+            root = "query=" + $q.escape_url_query() + "&time=" + $at.ts_format("2006-01-02T15:04:05Z07:00", "UTC").escape_url_query()
+        - http:
+            headers:
+              Authorization: Bearer ${PROMETHEUS_TOKEN}
+              Content-Type: application/x-www-form-urlencoded
+            retries: 3
+            timeout: 30s
+            url: https://prometheus.syncron.internal/api/v1/query
+            verb: POST
+          label: prometheus_query
+        - label: prometheus_result
+          mapping: |
+            root = if this.status != "success" {
+              throw("Prometheus query failed: " + this.error.or("unknown error"))
+            } else if this.data.resultType != "vector" {
+              throw("Expected an instant vector, got " + this.data.resultType.string())
+            } else if this.warnings.or([]).length() > 0 {
+              throw("Prometheus returned warnings, usage may be partial: " + this.warnings.join("; "))
+            } else { this.data.result }
+        - unarchive:
+            format: json_array
+        - mutation: meta collector_row = true
+        - label: normalize_row
+          mapping: 'root = {"labels": this.metric.or({}), "value": this.value.index(1).string(), "at": this.value.index(0).number()}'
+        - label: flexprice_event
+          mapping: |
+            let labels = this.labels.or({})
+            let raw = this.value.string()
+            let value = if $raw.re_match("^(NaN|[+-]?Inf)$") { throw("Non-finite value " + $raw) } else { $raw.number() }
+            let _neg = if $value < 0 { throw("Negative value " + $raw) }
+            let _eval = if @evaluated_at != null && this.at != @evaluated_at { throw("Unexpected evaluation time " + this.at.string()) }
+            let _req = if $labels.get("instance").or("") == "" { throw("Missing required label instance") }
+            let customer = $labels.get("label_tags_syncron_com_sy_tenant").or("")
+            let _customer = if $customer == "" { throw("Missing customer label label_tags_syncron_com_sy_tenant") }
+            let identity = ["syncron-cpu-hours", "syncron_cpu_hours", $customer, @query, @window_seconds, @window_end_unix, $labels.key_values().sort_by(p -> p.key)]
+            root = {
+              "event_id": "col_" + $identity.string().hash("sha256").encode("hex").slice(0, 40),
+              "event_name": "syncron_cpu_hours",
+              "external_customer_id": $customer,
+              "timestamp": @window_start,
+              "source": "collector:syncron-cpu-hours",
+              "properties": {}.merge({"product": "dataops"}).merge({"value": $raw})
+            }
+  threads: 1

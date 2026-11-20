@@ -1,0 +1,106 @@
+# Self-hosted collector next to Prometheus: one pod with the UI/API, which
+# manages and publishes collector configs, and plain Bento in streams mode,
+# which runs every published collector on its schedule. They share the volume.
+#
+# Connections are owned by this deployment (ConfigMap below); the UI only manages
+# collectors. Credentials come from your Secret as environment variables:
+#
+#   kubectl create namespace flexprice-collector
+#   kubectl -n flexprice-collector create secret generic collector-secrets \
+#     --from-literal=prometheus-password='<prometheus password or token>' \
+#     --from-literal=flexprice-api-key='<flexprice api key>'
+#   kubectl -n flexprice-collector apply -f collector.yaml
+#   kubectl -n flexprice-collector port-forward svc/collector-ui 8090:8090
+#
+# The UI has no login: keep the Service cluster-internal, or put your own
+# authenticating proxy (SSO) in front of it.
+#
+# The Secret can be synced from AWS/GCP Secrets Manager or Vault by External
+# Secrets Operator; the collector only reads the environment variables.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: collector-connections
+data:
+  connections.yaml: |
+    connections:
+      - id: prometheus
+        type: prometheus
+        url: http://prometheus-server.monitoring.svc:9090   # your Prometheus
+        auth_type: basic                                    # none | basic | bearer
+        username: collector
+        secret_env: PROMETHEUS_PASSWORD
+      - id: flexprice
+        type: flexprice
+        url: https://api.cloud.flexprice.io
+        secret_env: FLEXPRICE_API_KEY
+        # headers: { x-environment-id: "${FLEXPRICE_ENV_ID}" }   # self-hosted Flexprice only
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: collector-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector-ui
+  labels: { app: collector-ui }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: collector-ui }
+  template:
+    metadata:
+      labels: { app: collector-ui }
+    spec:
+      securityContext: { runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 }
+      containers:
+        - name: collector
+          image: ghcr.io/flexprice/bento-collector:latest
+          args: ["collector", "serve", "--addr", ":8090"]
+          env:
+            - { name: COLLECTOR_GIT, value: "true" }
+            - { name: COLLECTOR_CONNECTIONS_FILE, value: /config/connections.yaml }
+            - name: PROMETHEUS_PASSWORD
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+            - name: FLEXPRICE_API_KEY
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
+          ports: [{ containerPort: 8090 }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8090 } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: connections, mountPath: /config, readOnly: true }
+        # Runs one stream per published collector (/data/streams/<id>.yaml) and
+        # applies publish, rollback and unpublish without a restart.
+        - name: bento
+          image: ghcr.io/flexprice/bento-collector:latest
+          command: ["/bin/sh", "-c", "mkdir -p /data/streams && exec /app/bento-flexprice -w streams --no-api /data/streams"]
+          env:
+            - name: PROMETHEUS_PASSWORD
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: prometheus-password } }
+            - name: FLEXPRICE_API_KEY
+              valueFrom: { secretKeyRef: { name: collector-secrets, key: flexprice-api-key } }
+          ports: [{ containerPort: 4195 }]
+          livenessProbe: { httpGet: { path: /ping, port: 4195 } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: collector-data }
+        - name: connections
+          configMap: { name: collector-connections }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collector-ui
+spec:
+  selector: { app: collector-ui }
+  ports: [{ port: 8090, targetPort: 8090 }]

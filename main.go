@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/joho/godotenv"
 	"github.com/warpstreamlabs/bento/public/service"
@@ -10,6 +11,7 @@ import (
 	_ "github.com/warpstreamlabs/bento/public/components/all"
 
 	// Import custom Flexprice output plugin
+	"github.com/flexprice/bento-collector/collector"
 	_ "github.com/flexprice/bento-collector/output"
 )
 
@@ -22,6 +24,9 @@ func main() {
 	// use environment variables from the shell or system environment
 	// Errors are ignored since .env file is optional
 	_ = godotenv.Load()
+	if len(os.Args) > 1 && os.Args[1] == "collector" {
+		os.Exit(collector.Main(os.Args[2:], os.Stdout, os.Stderr))
+	}
 
 	// Run Bento as a service with CLI support
 	// This will read config from -c flag or stdin

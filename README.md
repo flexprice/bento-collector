@@ -65,6 +65,7 @@ Generic, runnable configs meant as starting points.
 |--------|------|-------|
 | [dummy-events-to-flexprice.yaml](examples/dummy-events-to-flexprice.yaml) | generate → Flexprice | No infrastructure needed — start here |
 | [prometheus-to-flexprice.yaml](examples/prometheus-to-flexprice.yaml) | Prometheus HTTP API → Flexprice | Scheduled PromQL, customer-labeled counter deltas; [simulation and caveats](examples/prometheus/README.md) |
+| [Collector UI](examples/collector/README.md) | Prometheus → Flexprice, set up in a UI | `bento-flexprice collector serve`: map, preview, version, publish to Bento streams |
 | [generate-to-kafka.yaml](examples/kafka/generate-to-kafka.yaml) | generate → Kafka | Produces test events for the two below |
 | [consume-from-kafka.yaml](examples/kafka/consume-from-kafka.yaml) | Kafka → Flexprice | Simple consume |
 | [consume-from-kafka-with-dlq.yaml](examples/kafka/consume-from-kafka-with-dlq.yaml) | Kafka → Flexprice + DLQ | Recommended for production |
@@ -299,7 +300,9 @@ go build -o bento-flexprice main.go
 
 ```
 bento-collector/
-├── main.go                              # Entry point — registers plugins, runs Bento CLI
+├── main.go                              # Entry point — registers plugins, runs Bento CLI or `collector`
+├── collector/                           # Collector UI/API: spec, store, render, engine, server, web (examples/collector)
+├── deploy/                              # Kubernetes and docker-compose examples for the collector UI
 ├── output/
 │   ├── flexprice.go                     # Flexprice output plugin (single + bulk)
 │   ├── azure_eh_oauth_cache.go          # `azure_eventhub_oauth` cache plugin
