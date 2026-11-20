@@ -28,13 +28,18 @@ func (s *Server) Handler() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("GET /api/connections", s.listConnections)
 	api.HandleFunc("POST /api/connections/{id}/test", s.testConnection)
+	api.HandleFunc("GET /api/connections/{id}/meters", s.meters)
+	api.HandleFunc("GET /api/connections/{id}/customers", s.customers)
+	api.HandleFunc("POST /api/connections/{id}/customers/check", s.checkCustomers)
 	api.HandleFunc("GET /api/collectors", s.listCollectors)
 	api.HandleFunc("GET /api/collectors/{id}", s.getCollector)
 	api.HandleFunc("PUT /api/collectors/{id}", s.saveCollector)
+	api.HandleFunc("DELETE /api/collectors/{id}", s.deleteCollector)
 	api.HandleFunc("GET /api/collectors/{id}/versions", s.listVersions)
 	api.HandleFunc("GET /api/collectors/{id}/versions/{version}", s.getVersion)
 	api.HandleFunc("POST /api/collectors/{id}/publish", s.publish)
 	api.HandleFunc("DELETE /api/collectors/{id}/publish", s.unpublish)
+	api.HandleFunc("POST /api/sample", s.sample)
 	api.HandleFunc("POST /api/preview", s.preview)
 	api.HandleFunc("POST /api/render", s.render)
 	mux.Handle("/api/", api)
@@ -176,6 +181,15 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, http.StatusOK, map[string]any{"published": p, "checks": checks})
 }
 
+// deleteCollector stops the collector if it runs and removes all its versions.
+func (s *Server) deleteCollector(w http.ResponseWriter, r *http.Request) {
+	if err := s.Store.Delete(r.PathValue("id")); err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) unpublish(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.Unpublish(r.PathValue("id")); err != nil {
 		writeErr(w, statusFor(err), err)
@@ -229,7 +243,8 @@ func (s *Server) saveCollector(w http.ResponseWriter, r *http.Request) {
 
 type previewRequest struct {
 	Collector spec.Collector `json:"collector"`
-	Day       string         `json:"day"`
+	// Window is the window start (YYYY-MM-DD or YYYY-MM-DDTHH:MM, UTC); empty means the last closed window.
+	Window string `json:"window"`
 }
 
 func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
@@ -237,13 +252,14 @@ func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	win, err := spec.ParseDay(req.Day, time.Now())
-	if err != nil {
+	req.Collector.Normalize()
+	if err := req.Collector.Validate(); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	req.Collector.Normalize()
-	if err := req.Collector.Validate(); err != nil {
+	t := req.Collector.Trigger
+	win, err := spec.ParseWindow(req.Window, t.Size(), t.DelayDuration(), time.Now())
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -260,22 +276,131 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	var day *spec.Window
-	if req.Day != "" {
-		win, err := spec.ParseDay(req.Day, time.Now())
+	req.Collector.Normalize()
+	if err := req.Collector.Validate(); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	var win *spec.Window
+	if req.Window != "" {
+		t := req.Collector.Trigger
+		pw, err := spec.ParseWindow(req.Window, t.Size(), t.DelayDuration(), time.Now())
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		day = &win
+		win = &pw
 	}
-	req.Collector.Normalize()
-	y, err := s.Engine.Render(req.Collector, day)
+	y, err := s.Engine.Render(req.Collector, win)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	writeJSONResp(w, http.StatusOK, map[string]string{"yaml": y})
+}
+
+type sampleRequest struct {
+	Source  spec.Source  `json:"source"`
+	Trigger spec.Trigger `json:"trigger"`
+	// From and To bound the sample (UTC); empty means the last seven days.
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// sample runs only the source query, before any mapping exists. A range query
+// returns every label set active in the range; a dated snapshot samples the
+// range's last day, since its query names one day.
+func (s *Server) sample(w http.ResponseWriter, r *http.Request) {
+	var req sampleRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	c := spec.Collector{Source: req.Source, Trigger: req.Trigger}
+	c.Normalize()
+	size, ok := spec.WindowSizes[c.Trigger.Window]
+	if !ok {
+		writeErr(w, http.StatusBadRequest, errors.New("trigger.window must be 1h, 2h, 3h, 4h, 6h, 8h, 12h or 1d"))
+		return
+	}
+	if strings.TrimSpace(c.Source.Query) == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("write a query first"))
+		return
+	}
+	win, err := spec.ParseRange(req.From, req.To, size, c.Trigger.DelayDuration(), time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if c.Source.Mode == spec.ModeUsageDate {
+		win = spec.WindowOf(win.End.Add(-size), size)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	res, err := s.Engine.Sample(ctx, c.Source, c.Trigger, win)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, res)
+}
+
+func (s *Server) meters(w http.ResponseWriter, r *http.Request) {
+	fp, err := s.Engine.Destination(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	ms, err := fp.Meters(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, ms)
+}
+
+func (s *Server) customers(w http.ResponseWriter, r *http.Request) {
+	fp, err := s.Engine.Destination(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	cs, err := fp.SearchCustomers(ctx, r.URL.Query().Get("q"), 20)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, cs)
+}
+
+type checkCustomersRequest struct {
+	ExternalIDs []string `json:"external_ids"`
+}
+
+func (s *Server) checkCustomers(w http.ResponseWriter, r *http.Request) {
+	var req checkCustomersRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	fp, err := s.Engine.Destination(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, statusFor(err), err)
+		return
+	}
+	if len(req.ExternalIDs) > 2000 {
+		req.ExternalIDs = req.ExternalIDs[:2000]
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	found, err := fp.ExistingCustomers(ctx, req.ExternalIDs)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"existing": found})
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {

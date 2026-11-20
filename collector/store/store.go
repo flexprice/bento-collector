@@ -30,6 +30,8 @@ type Store interface {
 	Publish(id string, version int, config, by string) (Published, error)
 	// Unpublish removes the stream config, so Bento stops the collector.
 	Unpublish(id string) error
+	// Delete removes the collector, its versions and its stream config.
+	Delete(id string) error
 	// Published returns the published version, or ErrNotFound.
 	Published(id string) (Published, error)
 }
@@ -193,6 +195,26 @@ func (s *FileStore) Unpublish(id string) error {
 		return err
 	}
 	return s.commit(path, fmt.Sprintf("unpublish collector %s", id))
+}
+
+func (s *FileStore) Delete(id string) error {
+	vs, err := s.versions(id)
+	if err != nil {
+		return err
+	}
+	if len(vs) == 0 {
+		return ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.Remove(s.streamPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	dir := filepath.Join(s.Dir, "collectors", id)
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return s.commit(dir, fmt.Sprintf("delete collector %s", id))
 }
 
 func (s *FileStore) Published(id string) (Published, error) {

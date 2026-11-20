@@ -28,7 +28,7 @@ Commands:
   serve    Run the collector UI and API; publishing writes stream configs for
            bento-flexprice -w streams <streams dir>
   render   Print a collector's stream config (secrets as env placeholders); with
-           --day, a one-off config for plain bento-flexprice -c (backfill)
+           --window, a one-off config for plain bento-flexprice -c (backfill)
 
 Run "bento-flexprice collector <command> -h" for flags.
 `
@@ -135,7 +135,7 @@ func renderCmd(args []string, stdout io.Writer) error {
 	c.register(fs)
 	id := fs.String("collector", "", "collector id")
 	version := fs.Int("version", 0, "version (default latest)")
-	day := fs.String("day", "", "UTC day YYYY-MM-DD: a one-off config for that day, for backfills (default: the scheduled stream config publish writes)")
+	window := fs.String("window", "", "window start in UTC, YYYY-MM-DD or YYYY-MM-DDTHH:MM: a one-off config for that window, for backfills (default: the scheduled stream config publish writes)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -148,12 +148,15 @@ func renderCmd(args []string, stdout io.Writer) error {
 		return err
 	}
 	var w *spec.Window
-	if *day != "" {
-		d, err := spec.ParseDay(*day, time.Now())
+	if *window != "" {
+		if err := col.Validate(); err != nil {
+			return err
+		}
+		pw, err := spec.ParseWindow(*window, col.Trigger.Size(), col.Trigger.DelayDuration(), time.Now())
 		if err != nil {
 			return err
 		}
-		w = &d
+		w = &pw
 	}
 	y, err := eng.Render(col, w)
 	if err != nil {

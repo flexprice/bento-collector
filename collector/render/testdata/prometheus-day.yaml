@@ -1,15 +1,19 @@
-# Rendered from collector syncron-cpu-hours v3 for one day. Do not edit; change the spec instead.
+# Rendered from collector syncron-cpu-hours v3 for the 1d window starting 2026-11-16T00:00:00Z. Do not edit; change the spec instead.
 input:
   generate:
     auto_replay_nacks: false
     count: 1
     interval: ""
     mapping: |
+      let size = 86400
       let start = 1794787200
       let now = 1794787200
       meta window_start = $start.ts_format("2006-01-02T15:04:05Z07:00", "UTC")
-      meta window_end = ($start + 86400).ts_format("2006-01-02T15:04:05Z07:00", "UTC")
-      meta window_end_unix = $start + 86400
+      meta window_end = ($start + $size).ts_format("2006-01-02T15:04:05Z07:00", "UTC")
+      meta window_start_unix = $start
+      meta window_end_unix = $start + $size
+      meta window_seconds = $size
+      meta window_length = "1d"
       meta usage_date = $start.ts_format("2006-01-02", "UTC")
       meta now_unix = $now
       root = {}
@@ -19,9 +23,6 @@ output:
       - check: errored()
         output:
           reject: 'collector syncron-cpu-hours rejected a row: ${! error() }'
-      - check: '@collector_skip == "true"'
-        output:
-          drop: {}
       - output:
           flexprice:
             api_host: api.cloud.flexprice.io
@@ -43,19 +44,19 @@ pipeline:
                   timeout: 30s
                   url: https://prometheus.syncron.internal/api/v1/query
                   verb: POST
-            request_map: root = "query=" + "count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440".escape_url_query() + "&time=" + @window_end_unix.ts_format("2006-01-02T15:04:05Z07:00", "UTC").escape_url_query()
+            request_map: root = "query=" + "count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440".replace_all("__USAGE_DATE__", @usage_date).replace_all("__WINDOW__", @window_length).escape_url_query() + "&time=" + @window_end_unix.ts_format("2006-01-02T15:04:05Z07:00", "UTC").escape_url_query()
             result_map: |-
               let r = this.data.result.or([])
               let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
               meta collector_completeness = $vals
-              meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this day" }
+              meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this window" }
               meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= 0.999)
           label: completeness
         - label: completeness_gate
-          mapping: root = if @collector_complete != true { throw("Day " + @usage_date + " is not fully measured (completeness below 0.999); nothing sent. Backfill it with render --day " + @usage_date + " once the data is complete.") } else { this }
+          mapping: root = if @collector_complete != true { throw("Window " + @window_start + " is not fully measured (completeness below 0.999); nothing sent. Backfill it with render --window " + @window_start + " once the data is complete.") } else { this }
         - label: prometheus_request
           mapping: |-
-            let q = "sum by (label_tags_syncron_com_sy_tenant, instance) (label_replace(sum_over_time(dp_dsi_pod_cpu_requests_cores[1d]), \"instance\", \"$1\", \"label_tags_syncron_com_dataops_data_service_instance\", \"(.*)\")) / 60".replace_all("__USAGE_DATE__", @usage_date)
+            let q = "sum by (label_tags_syncron_com_sy_tenant, instance) (label_replace(sum_over_time(dp_dsi_pod_cpu_requests_cores[1d]), \"instance\", \"$1\", \"label_tags_syncron_com_dataops_data_service_instance\", \"(.*)\")) / 60".replace_all("__USAGE_DATE__", @usage_date).replace_all("__WINDOW__", @window_length)
             let at = @window_end_unix
             meta query = $q
             meta evaluated_at = $at
@@ -87,23 +88,19 @@ pipeline:
           mapping: |
             let labels = this.labels.or({})
             let raw = this.value.string()
-            let key = $labels.get("label_tags_syncron_com_sy_tenant").or("")
-            let skip = [].contains($key)
-            let value = if $raw.re_match("^(NaN|[+-]?Inf)$") { if $skip { 0 } else { throw("Non-finite value " + $raw) } } else { $raw.number() }
-            let _neg = if !$skip && $value < 0 { throw("Negative value " + $raw) }
+            let value = if $raw.re_match("^(NaN|[+-]?Inf)$") { throw("Non-finite value " + $raw) } else { $raw.number() }
+            let _neg = if $value < 0 { throw("Negative value " + $raw) }
             let _eval = if @evaluated_at != null && this.at != @evaluated_at { throw("Unexpected evaluation time " + this.at.string()) }
-            let _req = if !$skip && $labels.get("instance").or("") == "" { throw("Missing required label instance") }
-            let _key = if $key == "" { throw("Missing customer label label_tags_syncron_com_sy_tenant") }
-            let customer = if $skip { "" } else { {"trn_acme": "cust_acme", "trn_globex": "cust_globex"}.get($key).or(throw("No customer mapped for " + "label_tags_syncron_com_sy_tenant" + "=" + $key)) }
-            let kept = $labels.without("__name__").map_each(p -> p.value.string())
-            let identity = ["syncron-cpu-hours", "syncron_cpu_hours", $customer, @query, 86400, @window_end_unix, $labels.key_values().sort_by(p -> p.key)]
-            meta collector_skip = if $skip { "true" }
-            root = if $skip { {"skipped": $key} } else { {
+            let _req = if $labels.get("instance").or("") == "" { throw("Missing required label instance") }
+            let customer = $labels.get("label_tags_syncron_com_sy_tenant").or("")
+            let _customer = if $customer == "" { throw("Missing customer label label_tags_syncron_com_sy_tenant") }
+            let identity = ["syncron-cpu-hours", "syncron_cpu_hours", $customer, @query, @window_seconds, @window_end_unix, $labels.key_values().sort_by(p -> p.key)]
+            root = {
               "event_id": "col_" + $identity.string().hash("sha256").encode("hex").slice(0, 40),
               "event_name": "syncron_cpu_hours",
               "external_customer_id": $customer,
               "timestamp": @window_start,
               "source": "collector:syncron-cpu-hours",
-              "properties": $kept.merge({"product": "dataops", "unit": "core_hours", "window_seconds": "86400"}).merge({"window_start": @window_start, "window_end": @window_end, "value": $raw})
-            } }
+              "properties": {}.merge({"product": "dataops"}).merge({"value": $raw})
+            }
   threads: 1

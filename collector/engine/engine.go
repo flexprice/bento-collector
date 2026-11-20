@@ -1,6 +1,7 @@
 // Package engine previews collectors for one usage window (completeness gate,
-// the rendered Bento pipeline, Flexprice checks) and renders the stream config
-// that Bento runs once a version is published. It never sends events.
+// the rendered Bento pipeline, Flexprice checks), samples source queries and
+// lists Flexprice meters and customers for the UI, and renders the stream
+// config that Bento runs once a version is published. It never sends events.
 package engine
 
 import (
@@ -86,7 +87,6 @@ type Result struct {
 	Rows         []Row               `json:"rows"`
 	Events       int                 `json:"events"`
 	Rejected     int                 `json:"rejected"`
-	Skipped      int                 `json:"skipped"`
 	Checks       []Check             `json:"checks"`
 	OK           bool                `json:"ok"`
 	StartedAt    time.Time           `json:"started_at"`
@@ -168,20 +168,30 @@ func placeholder(c spec.Connection) string {
 	return "${" + c.SecretEnv + "}"
 }
 
+func (e *Engine) lastClosed(c spec.Collector) spec.Window {
+	return spec.LastClosed(c.Trigger.Size(), c.Trigger.DelayDuration(), e.Now())
+}
+
 // Validate checks a collector against its provider and connections.
 func (e *Engine) Validate(c spec.Collector) error {
-	_, err := e.resolve(c, spec.DayWindow(e.Now()), false)
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	_, err := e.resolve(c, e.lastClosed(c), false)
 	return err
 }
 
-// Render returns the stream config: scheduled on trigger.schedule when day is
-// nil (what Publish writes), otherwise one run for that day (a backfill).
-func (e *Engine) Render(c spec.Collector, day *spec.Window) (string, error) {
-	w := spec.DayWindow(e.Now().Add(-24 * time.Hour))
-	if day != nil {
-		w = *day
+// Render returns the stream config: scheduled on the trigger's cron when w is
+// nil (what Publish writes), otherwise one run for that window (a backfill).
+func (e *Engine) Render(c spec.Collector, w *spec.Window) (string, error) {
+	if err := c.Validate(); err != nil {
+		return "", err
 	}
-	pl, err := e.resolve(c, w, false)
+	win := e.lastClosed(c)
+	if w != nil {
+		win = *w
+	}
+	pl, err := e.resolve(c, win, false)
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +199,7 @@ func (e *Engine) Render(c spec.Collector, day *spec.Window) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return render.Standalone(pl.provider, pl.in, out, day == nil)
+	return render.Standalone(pl.provider, pl.in, out, w == nil)
 }
 
 // TestConnection checks reachability and credentials of one connection.
@@ -244,7 +254,7 @@ func (e *Engine) Preview(ctx context.Context, c spec.Collector, w spec.Window) (
 			if res.Completeness.Error != "" {
 				res.check("error", "Completeness check failed: %s", res.Completeness.Error)
 			} else {
-				res.check("error", "Day is not fully measured (completeness %v, need ≥ %v). A published config sends nothing for this day.", res.Completeness.Values, cp.Min)
+				res.check("error", "The window is not fully measured (completeness %v, need ≥ %v). A published config sends nothing for this window.", res.Completeness.Values, cp.Min)
 			}
 		}
 	}
@@ -253,21 +263,19 @@ func (e *Engine) Preview(ctx context.Context, c spec.Collector, w spec.Window) (
 	if err != nil {
 		return nil, err
 	}
-	rows, skipped, queryErrs, err := runPipeline(ctx, conf)
+	rows, queryErrs, err := runPipeline(ctx, conf)
 	if err != nil {
 		return nil, err
 	}
 	res.Rows = rows
-	res.Skipped = skipped
-	if skipped > 0 {
-		res.check("ok", "%d row(s) skipped: label values listed as not billed", skipped)
-	}
 	for _, qe := range queryErrs {
 		res.check("error", "Query failed: %s", qe)
 	}
 
 	fp := e.flexprice(pl.dest, pl.destKey)
-	(*checks)(&res.Checks).meter(ctx, fp, c.Mapping.EventName)
+	if m := (*checks)(&res.Checks).meter(ctx, fp, c.Mapping); m != nil {
+		checkFilters(res, *m)
+	}
 	e.checkCustomers(ctx, fp, res)
 
 	for _, r := range res.Rows {
@@ -277,7 +285,7 @@ func (e *Engine) Preview(ctx context.Context, c spec.Collector, w spec.Window) (
 			res.Events++
 		}
 	}
-	if res.Events+res.Rejected+res.Skipped == 0 {
+	if res.Events+res.Rejected == 0 {
 		res.check("warning", "The query returned no rows: zero usage, a wrong tenant or data older than retention.")
 	}
 	if res.Rejected > 0 {
@@ -288,72 +296,118 @@ func (e *Engine) Preview(ctx context.Context, c spec.Collector, w spec.Window) (
 }
 
 // Publish renders the scheduled stream config for a saved version after
-// checking Flexprice: the meter must exist and so must every customer the
-// spec names. Any error check means the config must not be published.
+// checking Flexprice: the meter must exist and read the value property. An
+// error check means the config must not be published; customers that do not
+// exist yet are only a warning, since Flexprice stores their events.
 func (e *Engine) Publish(ctx context.Context, c spec.Collector) (string, []Check, error) {
 	c.Normalize()
 	y, err := e.Render(c, nil)
 	if err != nil {
 		return "", nil, err
 	}
-	pl, err := e.resolve(c, spec.DayWindow(e.Now()), true)
+	pl, err := e.resolve(c, e.lastClosed(c), true)
 	if err != nil {
 		return "", nil, err
 	}
 	fp := e.flexprice(pl.dest, pl.destKey)
 	cs := checks{}
-	cs.meter(ctx, fp, c.Mapping.EventName)
-	ids := specCustomers(c)
-	if c.Mapping.Customer.From == spec.CustomerLabel && len(c.Mapping.Customer.Lookup) == 0 {
-		cs.add("warning", "Customers come straight from label %s, so they are only checked in preview.", c.Mapping.Customer.Label)
+	cs.meter(ctx, fp, c.Mapping)
+	if c.Mapping.Customer.From == spec.CustomerLabel {
+		cs.add("ok", "Customers come from label %s, so new values are picked up without republishing.", c.Mapping.Customer.Label)
+		return y, cs, nil
+	}
+	ids := []string{c.Mapping.Customer.Value}
+	found, err := fp.ExistingCustomers(ctx, ids)
+	if err != nil {
+		cs.add("warning", "Could not check customers in Flexprice: %v", err)
+		return y, cs, nil
 	}
 	var missing []string
 	for _, id := range ids {
-		ok, err := fp.CustomerExists(ctx, id)
-		if err != nil {
-			cs.add("error", "Could not check customer %q in Flexprice: %v", id, err)
-			return y, cs, nil
-		}
-		if !ok {
+		if !found[id] {
 			missing = append(missing, id)
 		}
 	}
 	if len(missing) > 0 {
-		cs.add("error", "These customers do not exist in Flexprice: %v. Create them or fix the customer mapping, then publish.", missing)
-	} else if len(ids) > 0 {
+		cs.add("warning", "No Flexprice customer for %v yet. Their events are still sent and stored, but bill nobody until the customer exists.", missing)
+	} else {
 		cs.add("ok", "All %d customer(s) exist in Flexprice", len(ids))
 	}
 	return y, cs, nil
 }
 
-// specCustomers are the customer ids the spec names: the static value or the
-// lookup table's targets.
-func specCustomers(c spec.Collector) []string {
-	if c.Mapping.Customer.From == spec.CustomerStatic {
-		return []string{c.Mapping.Customer.Value}
+// meter checks that the collector's meter exists and reads the property the
+// value is sent as, and returns it.
+func (cs *checks) meter(ctx context.Context, fp flexprice.Client, m spec.Mapping) *flexprice.Meter {
+	meters, err := fp.MetersFor(ctx, m.EventName)
+	if err != nil {
+		cs.add("error", "Could not check meters in Flexprice: %v", err)
+		return nil
 	}
-	seen := map[string]bool{}
-	var ids []string
-	for _, id := range c.Mapping.Customer.Lookup {
-		if !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
+	if len(meters) == 0 {
+		cs.add("error", "No published Flexprice meter uses event_name %q. Events would be stored but never billed.", m.EventName)
+		return nil
+	}
+	var target *flexprice.Meter
+	for i := range meters {
+		if (m.MeterID != "" && meters[i].ID == m.MeterID) || (m.MeterID == "" && target == nil) {
+			target = &meters[i]
 		}
 	}
-	sort.Strings(ids)
-	return ids
+	if target == nil {
+		cs.add("error", "Meter %s no longer uses event_name %q. Pick the meter again.", m.MeterID, m.EventName)
+		return nil
+	}
+	if vp := target.ValueProperty(); vp != "" && vp != m.ValueProperty {
+		cs.add("error", "Meter %q aggregates properties.%s, but the value is sent as properties.%s, so it would count nothing.", target.Name, vp, m.ValueProperty)
+		return target
+	}
+	cs.add("ok", "Meter %q found (%s of %s)", target.Name, target.Aggregation.Type, orDash(target.ValueProperty()))
+	return target
 }
 
-func (cs *checks) meter(ctx context.Context, fp flexprice.Client, eventName string) {
-	meters, err := fp.MetersFor(ctx, eventName)
-	switch {
-	case err != nil:
-		cs.add("error", "Could not check meters in Flexprice: %v", err)
-	case len(meters) == 0:
-		cs.add("error", "No Flexprice meter uses event_name %q. Events would be stored but never billed.", eventName)
-	default:
-		cs.add("ok", "Meter found for %q (%d)", eventName, len(meters))
+// checkFilters warns about events the meter's filters would not count: no
+// filter property at all, or a value the filter does not allow.
+func checkFilters(res *Result, m flexprice.Meter) {
+	for _, f := range m.Filters {
+		allowed := map[string]bool{}
+		for _, v := range f.Values {
+			allowed[v] = true
+		}
+		events, missing := 0, 0
+		var rejected []string
+		seen := map[string]bool{}
+		for _, r := range res.Rows {
+			props, ok := r.Event["properties"].(map[string]any)
+			if !ok {
+				continue
+			}
+			events++
+			v, has := props[f.Key].(string)
+			switch {
+			case !has || v == "":
+				missing++
+			case len(allowed) > 0 && !allowed[v] && !seen[v]:
+				seen[v] = true
+				rejected = append(rejected, v)
+			}
+		}
+		switch {
+		case events == 0:
+		case missing == events:
+			res.check("warning", "Meter %q filters on %s, but no event carries it, so the meter counts none of them. Add an event property named %s.", m.Name, f.Key, f.Key)
+		case len(rejected) > 0:
+			sort.Strings(rejected)
+			res.check("warning", "Meter %q only counts %s in %v; events with %v are sent but not counted.", m.Name, f.Key, f.Values, rejected)
+		}
 	}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // completeness runs the rendered gate on its own, so preview shows the verdict
@@ -406,36 +460,110 @@ func (e *Engine) completeness(ctx context.Context, pl plan, cp spec.Completeness
 	return out, nil
 }
 
+// checkCustomers warns about events for customers Flexprice does not know.
+// They are still sent: Flexprice stores them, and bills them once the
+// customer exists.
 func (e *Engine) checkCustomers(ctx context.Context, fp flexprice.Client, res *Result) {
-	known := map[string]bool{}
-	var missing []string
-	for i, r := range res.Rows {
-		if r.Error != "" {
-			continue
-		}
+	seen := map[string]bool{}
+	var ids []string
+	for _, r := range res.Rows {
 		id, _ := r.Event["external_customer_id"].(string)
-		ok, seen := known[id]
-		if !seen {
-			exists, err := fp.CustomerExists(ctx, id)
-			if err != nil {
-				res.check("error", "Could not check customer %q in Flexprice: %v", id, err)
-				return
-			}
-			known[id], ok = exists, exists
-			if !exists {
-				missing = append(missing, id)
-			}
+		if r.Error == "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
-		if !ok {
-			res.Rows[i].Error = fmt.Sprintf("Customer %q does not exist in Flexprice", id)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	found, err := fp.ExistingCustomers(ctx, ids)
+	if err != nil {
+		res.check("warning", "Could not check customers in Flexprice: %v", err)
+		return
+	}
+	var missing []string
+	for _, id := range ids {
+		if !found[id] {
+			missing = append(missing, id)
 		}
 	}
 	sort.Strings(missing)
 	if len(missing) > 0 {
-		res.check("warning", "Unknown customers: %v. Create them in Flexprice or fix the customer mapping.", missing)
-	} else if len(known) > 0 {
-		res.check("ok", "All %d customer(s) exist in Flexprice", len(known))
+		res.check("warning", "No Flexprice customer for %v. Their events are still sent and stored, but bill nobody until the customer exists.", missing)
+	} else {
+		res.check("ok", "All %d customer(s) exist in Flexprice", len(ids))
 	}
+}
+
+// SampleResult is a source query's rows for one window, before any mapping.
+type SampleResult struct {
+	Window      spec.Window     `json:"window"`
+	Query       string          `json:"query"`
+	EvaluatedAt time.Time       `json:"evaluated_at"`
+	Rows        []source.Sample `json:"rows"`
+	Truncated   bool            `json:"truncated"`
+}
+
+const maxSampleRows = 5000
+
+// Sample runs a source query for one window, so the UI can offer the labels
+// and values it returns. It needs only the source and the window.
+func (e *Engine) Sample(ctx context.Context, src spec.Source, t spec.Trigger, w spec.Window) (*SampleResult, error) {
+	c := spec.Collector{Source: src, Trigger: t}
+	c.Normalize()
+	p, conn, err := e.source(c.Source.Connection, c.Source.Type)
+	if err != nil {
+		return nil, err
+	}
+	in := source.Input{Collector: c, Conn: conn.Connection, Window: w, Now: e.Now()}
+	rows, err := p.Sample(ctx, conn, in)
+	if err != nil {
+		return nil, err
+	}
+	st, err := p.Stages(in)
+	if err != nil {
+		return nil, err
+	}
+	res := &SampleResult{Window: w, Query: st.Query, EvaluatedAt: st.EvaluatedAt, Rows: rows}
+	if len(rows) > maxSampleRows {
+		res.Rows, res.Truncated = rows[:maxSampleRows], true
+	}
+	return res, nil
+}
+
+func (e *Engine) source(connID, typ string) (source.Provider, source.Conn, error) {
+	c, err := e.Connections.Get(connID)
+	if err != nil {
+		return nil, source.Conn{}, err
+	}
+	if typ != "" && c.Type != typ {
+		return nil, source.Conn{}, fmt.Errorf("connection %q is %s, not %s", c.ID, c.Type, typ)
+	}
+	p, err := e.Sources.Get(c.Type)
+	if err != nil {
+		return nil, source.Conn{}, err
+	}
+	secret, err := e.Connections.Secret(c)
+	if err != nil {
+		return nil, source.Conn{}, err
+	}
+	return p, source.Conn{Connection: c, Secret: secret, HTTP: e.HTTP}, nil
+}
+
+// Destination is a Flexprice API client for a destination connection.
+func (e *Engine) Destination(id string) (flexprice.Client, error) {
+	c, err := e.Connections.Get(id)
+	if err != nil {
+		return flexprice.Client{}, err
+	}
+	if err := flexprice.ValidateConnection(c); err != nil {
+		return flexprice.Client{}, err
+	}
+	key, err := e.Connections.Secret(c)
+	if err != nil {
+		return flexprice.Client{}, err
+	}
+	return e.flexprice(c, key), nil
 }
 
 var assignmentPrefix = regexp.MustCompile(`^failed assignment \(line \d+\): `)
@@ -443,23 +571,16 @@ var assignmentPrefix = regexp.MustCompile(`^failed assignment \(line \d+\): `)
 // runPipeline executes a rendered pipeline in-process and collects every
 // message, keeping the mapping error on rows that failed. Errors on messages
 // without the collector_row marker failed before rows existed (the query).
-func runPipeline(ctx context.Context, conf string) ([]Row, int, []string, error) {
+func runPipeline(ctx context.Context, conf string) ([]Row, []string, error) {
 	sb := service.NewStreamBuilder()
 	if err := sb.SetYAML(conf); err != nil {
-		return nil, 0, nil, fmt.Errorf("rendered config is invalid: %w", err)
+		return nil, nil, fmt.Errorf("rendered config is invalid: %w", err)
 	}
 	var mu sync.Mutex
 	rows := []Row{}
-	skipped := 0
 	var queryErrs []string
 	err := sb.AddConsumerFunc(func(_ context.Context, msg *service.Message) error {
 		raw, _ := msg.AsBytes()
-		if v, _ := msg.MetaGet("collector_skip"); v == "true" && msg.GetError() == nil {
-			mu.Lock()
-			skipped++
-			mu.Unlock()
-			return nil
-		}
 		row := Row{}
 		if err := msg.GetError(); err != nil {
 			if isRow, _ := msg.MetaGetMut("collector_row"); isRow != true {
@@ -481,16 +602,16 @@ func runPipeline(ctx context.Context, conf string) ([]Row, int, []string, error)
 		return nil
 	})
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, nil, err
 	}
 	stream, err := sb.Build()
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, nil, err
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if err := stream.Run(runCtx); err != nil && err != context.Canceled {
-		return nil, 0, nil, err
+		return nil, nil, err
 	}
-	return rows, skipped, queryErrs, nil
+	return rows, queryErrs, nil
 }

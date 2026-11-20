@@ -5,7 +5,7 @@ import (
 	"github.com/flexprice/bento-collector/collector/spec"
 )
 
-// CPUCollector is a daily CPU core-hours collector with a tenant → customer table.
+// CPUCollector is a daily CPU core-hours collector billing each tenant label value.
 func CPUCollector() spec.Collector {
 	c := spec.Collector{
 		ID:   "syncron-cpu-hours",
@@ -15,8 +15,7 @@ func CPUCollector() spec.Collector {
 		Trigger: spec.Trigger{Completeness: &spec.Completeness{Query: "count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440", Min: 0.999}},
 		Mapping: spec.Mapping{
 			EventName:      "syncron_cpu_hours",
-			Unit:           "core_hours",
-			Customer:       spec.CustomerMapping{From: spec.CustomerLabel, Label: "label_tags_syncron_com_sy_tenant", Lookup: map[string]string{"trn_acme": "cust_acme", "trn_globex": "cust_globex"}},
+			Customer:       spec.CustomerMapping{From: spec.CustomerLabel, Label: "label_tags_syncron_com_sy_tenant"},
 			RequiredLabels: []string{"instance"},
 			Properties:     map[string]string{"product": "dataops"},
 		},

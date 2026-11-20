@@ -5,7 +5,7 @@
 # runs every published collector.
 #   docker compose up -d
 # Backfill a day:
-#   docker compose run --rm -T collector-ui collector render --collector <id> --day 2026-11-07 > day.yaml
+#   docker compose run --rm -T collector-ui collector render --collector <id> --window 2026-11-07 > day.yaml
 #   docker compose run --rm -v "$PWD/day.yaml:/day.yaml:ro" collector-ui -c /day.yaml
 services:
   collector-ui:

@@ -19,6 +19,8 @@ import (
 type Sample struct {
 	Labels map[string]string `json:"labels"`
 	Value  float64           `json:"value"`
+	// Raw is the value as Prometheus sent it (NaN and Inf included).
+	Raw string `json:"raw"`
 }
 
 // Client talks to the Prometheus HTTP API.
@@ -116,7 +118,7 @@ func (p Client) Query(ctx context.Context, query string, at time.Time) ([]Sample
 			return nil, err
 		}
 		f, err := parseValue(v[1])
-		return []Sample{{Value: f}}, err
+		return []Sample{{Value: f, Raw: fmt.Sprint(v[1])}}, err
 	case "vector":
 		var vec []struct {
 			Metric map[string]string `json:"metric"`
@@ -131,7 +133,7 @@ func (p Client) Query(ctx context.Context, query string, at time.Time) ([]Sample
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, Sample{Labels: s.Metric, Value: f})
+			out = append(out, Sample{Labels: s.Metric, Value: f, Raw: fmt.Sprint(s.Value[1])})
 		}
 		return out, nil
 	}

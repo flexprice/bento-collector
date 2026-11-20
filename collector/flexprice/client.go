@@ -64,32 +64,126 @@ func (f Client) Test(ctx context.Context) error {
 	return err
 }
 
-// CustomerExists reports whether an external_customer_id is a Flexprice customer.
-func (f Client) CustomerExists(ctx context.Context, externalID string) (bool, error) {
-	code, err := f.do(ctx, http.MethodGet, "/v1/customers/external/"+url.PathEscape(externalID), nil, nil)
-	if code == http.StatusNotFound {
-		return false, nil
-	}
-	return err == nil, err
+// Meter is a Flexprice meter as the collector needs it.
+type Meter struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	EventName   string `json:"event_name"`
+	Status      string `json:"status,omitempty"`
+	Aggregation struct {
+		Type       string `json:"type"`
+		Field      string `json:"field,omitempty"`
+		Expression string `json:"expression,omitempty"`
+	} `json:"aggregation"`
+	Filters []struct {
+		Key    string   `json:"key"`
+		Values []string `json:"values"`
+	} `json:"filters"`
 }
 
-// MetersFor returns the ids of meters listening to an event name.
-func (f Client) MetersFor(ctx context.Context, eventName string) ([]string, error) {
+// ValueProperty is the event property the meter reads, or "" when it reads
+// none (COUNT, or an expression).
+func (m Meter) ValueProperty() string {
+	if m.Aggregation.Expression != "" || m.Aggregation.Type == "COUNT" {
+		return ""
+	}
+	return m.Aggregation.Field
+}
+
+// Meters lists the published meters.
+func (f Client) Meters(ctx context.Context) ([]Meter, error) {
+	out := []Meter{}
+	for offset := 0; ; offset += 500 {
+		var r struct {
+			Items []Meter `json:"items"`
+		}
+		if _, err := f.do(ctx, http.MethodGet, fmt.Sprintf("/v1/meters?limit=500&offset=%d", offset), nil, &r); err != nil {
+			return nil, err
+		}
+		for _, m := range r.Items {
+			if m.Status == "" || m.Status == "published" {
+				out = append(out, m)
+			}
+		}
+		if len(r.Items) < 500 {
+			return out, nil
+		}
+	}
+}
+
+// MetersFor returns the published meters listening to an event name.
+func (f Client) MetersFor(ctx context.Context, eventName string) ([]Meter, error) {
 	var r struct {
-		Items []struct {
-			ID        string `json:"id"`
-			EventName string `json:"event_name"`
-			Status    string `json:"status"`
-		} `json:"items"`
+		Items []Meter `json:"items"`
 	}
 	if _, err := f.do(ctx, http.MethodGet, "/v1/meters?limit=500&event_name="+url.QueryEscape(eventName), nil, &r); err != nil {
 		return nil, err
 	}
-	var ids []string
+	var out []Meter
 	for _, m := range r.Items {
 		if m.EventName == eventName && (m.Status == "" || m.Status == "published") {
-			ids = append(ids, m.ID)
+			out = append(out, m)
 		}
 	}
-	return ids, nil
+	return out, nil
+}
+
+// Customer is a Flexprice customer as the collector shows it.
+type Customer struct {
+	ID         string `json:"id"`
+	ExternalID string `json:"external_id"`
+	Name       string `json:"name"`
+}
+
+// SearchCustomers finds customers whose name or external ID contains q.
+func (f Client) SearchCustomers(ctx context.Context, q string, limit int) ([]Customer, error) {
+	if strings.TrimSpace(q) == "" {
+		r := struct {
+			Items []Customer `json:"items"`
+		}{Items: []Customer{}}
+		_, err := f.do(ctx, http.MethodGet, fmt.Sprintf("/v1/customers?limit=%d", limit), nil, &r)
+		return r.Items, err
+	}
+	seen := map[string]bool{}
+	out := []Customer{}
+	for _, field := range []string{"external_id", "name"} {
+		body := map[string]any{"limit": limit, "filters": []map[string]any{{
+			"field": field, "operator": "contains", "data_type": "string", "value": map[string]string{"string": q},
+		}}}
+		var r struct {
+			Items []Customer `json:"items"`
+		}
+		if _, err := f.do(ctx, http.MethodPost, "/v1/customers/search", body, &r); err != nil {
+			return nil, err
+		}
+		for _, c := range r.Items {
+			if !seen[c.ExternalID] {
+				seen[c.ExternalID] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out, nil
+}
+
+// ExistingCustomers returns which of the external IDs are Flexprice customers.
+func (f Client) ExistingCustomers(ctx context.Context, externalIDs []string) (map[string]bool, error) {
+	found := map[string]bool{}
+	for i := 0; i < len(externalIDs); i += 100 {
+		batch := externalIDs[i:min(i+100, len(externalIDs))]
+		q := url.Values{"limit": {fmt.Sprint(len(batch))}}
+		for _, id := range batch {
+			q.Add("external_ids", id)
+		}
+		var r struct {
+			Items []Customer `json:"items"`
+		}
+		if _, err := f.do(ctx, http.MethodGet, "/v1/customers?"+q.Encode(), nil, &r); err != nil {
+			return nil, err
+		}
+		for _, c := range r.Items {
+			found[c.ExternalID] = true
+		}
+	}
+	return found, nil
 }

@@ -56,6 +56,15 @@ type Provider interface {
 	// Gate returns processors that evaluate the completeness query and set
 	// meta collector_complete (bool) and collector_completeness (the values).
 	Gate(in Input, cp spec.Completeness) ([]any, error)
+	// Sample runs the source query for one window and returns its rows as
+	// they come back, so the UI can offer real labels and values.
+	Sample(ctx context.Context, c Conn, in Input) ([]Sample, error)
+}
+
+// Sample is one row of a source query.
+type Sample struct {
+	Labels map[string]string `json:"labels"`
+	Value  string            `json:"value"`
 }
 
 type Registry struct {

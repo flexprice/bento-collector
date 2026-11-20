@@ -1,5 +1,5 @@
-import { forwardRef, useEffect, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
-import { CheckCircle2Icon, CircleAlertIcon, InfoIcon, PlusIcon, TriangleAlertIcon, XIcon } from 'lucide-react'
+import { forwardRef, useEffect, useId, useLayoutEffect, useRef, useState, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react'
+import { CheckCircle2Icon, CircleAlertIcon, InfoIcon, TriangleAlertIcon } from 'lucide-react'
 import { cn } from '@/lib'
 import { Input as PInput } from '@/components/primitives/input'
 import { Textarea as PTextarea } from '@/components/primitives/textarea'
@@ -64,13 +64,13 @@ export function PageHeader({ title, meta, actions, breadcrumb }: { title: ReactN
 
 export function Section({ title, description, actions, children, flush, className }: { title: string; description?: ReactNode; actions?: ReactNode; children: ReactNode; flush?: boolean; className?: string }) {
   return (
-    <section className={cn('bg-background flex flex-col overflow-hidden rounded-xl border', className)}>
-      <div className="flex items-center justify-between gap-4 border-b px-5 py-3.5">
-        <div className="min-w-0">
+    <section className={cn('bg-background flex flex-col rounded-xl border', className)}>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b px-5 py-3.5">
+        <div className="min-w-64 flex-1">
           <h2 className="text-sm font-medium">{title}</h2>
           {description ? <p className="text-muted-foreground mt-0.5 text-[13px]">{description}</p> : null}
         </div>
-        {actions ? <div className="-my-1 flex shrink-0 items-center gap-2">{actions}</div> : null}
+        {actions ? <div className="-my-1 flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
       <div className={cn('min-w-0 flex-1', flush ? '' : 'p-5')}>{children}</div>
     </section>
@@ -138,41 +138,71 @@ export function Switch({ checked, onChange, label }: { checked: boolean; onChang
   return <PSwitch aria-label={label} checked={checked} onCheckedChange={(v: boolean) => onChange(v)} />
 }
 
-type Pair = { k: string; v: string }
-const toPairs = (o?: Record<string, string>): Pair[] => Object.entries(o ?? {}).map(([k, v]) => ({ k, v }))
-const toRecord = (rows: Pair[]) => Object.fromEntries(rows.filter((r) => r.k.trim()).map((r) => [r.k.trim(), r.v.trim()]))
-const sameRecord = (a: Record<string, string>, b: Record<string, string>) => JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort())
+export interface Option { value: string; label?: string; hint?: string; badge?: ReactNode }
 
-// Rows keep half-typed and blank entries locally; only rows with a key reach the parent.
-export function KeyValueInput({ value, onChange, keyLabel, valueLabel, keyPlaceholder, valuePlaceholder, addLabel = 'Add' }: {
-  value?: Record<string, string>; onChange: (v: Record<string, string>) => void
-  keyLabel: string; valueLabel: string; keyPlaceholder?: string; valuePlaceholder?: string; addLabel?: string
+// Combobox: pick from options, filtered as you type. allowCustom also accepts
+// typed text; onQuery lets the caller fetch options for the typed text instead.
+export function Combobox({ value, onChange, options, placeholder, allowCustom, customHint = 'typed', customOptions, onQuery, className, label, emptyText = 'No matches', disabled }: {
+  value: string; onChange: (v: string) => void; options: Option[]; placeholder?: string; allowCustom?: boolean; customHint?: string
+  // customOptions turns typed text into choices (instead of one "Use …" item).
+  customOptions?: (text: string) => Option[]
+  onQuery?: (q: string) => void; className?: string; label: string; emptyText?: string; disabled?: boolean
 }) {
-  const [rows, setRows] = useState<Pair[]>(() => toPairs(value))
-  useEffect(() => { if (!sameRecord(toRecord(rows), value ?? {})) setRows(toPairs(value)) }, [value]) // eslint-disable-line react-hooks/exhaustive-deps
-  const set = (next: Pair[]) => { setRows(next); onChange(toRecord(next)) }
-  const keys = rows.map((r) => r.k.trim())
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState<string | null>(null)
+  const [hi, setHi] = useState(0)
+  // A unique name keeps the browser from offering values typed into other fields.
+  const name = `cb-${useId()}`
+  // The list is fixed-positioned under the input, so table and section overflow cannot clip it.
+  const box = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!open) return
+    const place = () => { const r = box.current?.getBoundingClientRect(); if (r) setPos({ top: r.bottom + 4, left: r.left, width: r.width }) }
+    place()
+    window.addEventListener('scroll', place, true)
+    window.addEventListener('resize', place)
+    return () => { window.removeEventListener('scroll', place, true); window.removeEventListener('resize', place) }
+  }, [open])
+  const selected = options.find((o) => o.value === value)
+  const q = (text ?? '').trim().toLowerCase()
+  const filtered = (onQuery || !q ? options : options.filter((o) => `${o.value} ${o.label ?? ''} ${o.hint ?? ''}`.toLowerCase().includes(q))).slice(0, 200)
+  const custom = allowCustom && text?.trim() && !options.some((o) => o.value === text.trim()) ? text.trim() : null
+  const typedItems: Option[] = !custom ? [] : customOptions ? customOptions(custom).filter((o) => !options.some((x) => x.value === o.value)) : [{ value: custom, label: `Use "${custom}"`, hint: customHint }]
+  const items: Option[] = [...typedItems, ...filtered]
+  useEffect(() => {
+    if (!onQuery || text === null) return
+    const h = window.setTimeout(() => onQuery(text), 200)
+    return () => window.clearTimeout(h)
+  }, [text]) // eslint-disable-line react-hooks/exhaustive-deps
+  const pick = (v: string) => { onChange(v); setText(null); setOpen(false) }
   return (
-    <div className="flex flex-col gap-2">
-      {rows.length ? (
-        <div className="grid grid-cols-[1fr_1fr_auto] items-center gap-2">
-          <span className="text-muted-foreground text-xs">{keyLabel}</span>
-          <span className="text-muted-foreground text-xs">{valueLabel}</span>
-          <span />
-          {rows.map((r, i) => {
-            const dup = !!r.k.trim() && keys.indexOf(r.k.trim()) !== i
-            return [
-              <PInput key={`k${i}`} aria-label={`${keyLabel} ${i + 1}`} aria-invalid={dup || undefined} value={r.k} placeholder={keyPlaceholder} spellCheck={false}
-                onChange={(e) => set(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} />,
-              <PInput key={`v${i}`} aria-label={`${valueLabel} ${i + 1}`} value={r.v} placeholder={valuePlaceholder} spellCheck={false}
-                onChange={(e) => set(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} />,
-              <Button key={`x${i}`} variant="ghost" size="icon" aria-label={`Remove row ${i + 1}`} onClick={() => set(rows.filter((_, j) => j !== i))}><XIcon aria-hidden /></Button>,
-            ]
-          })}
-        </div>
+    <div ref={box} className={cn('relative', className)}>
+      <PInput role="combobox" aria-label={label} aria-expanded={open} aria-autocomplete="list" autoComplete="off" name={name} spellCheck={false} disabled={disabled} placeholder={placeholder}
+        value={text ?? (selected?.label ? `${selected.label}${selected.hint ? ` · ${selected.hint}` : ''}` : value)}
+        onFocus={(e) => { setOpen(true); setText(''); setHi(0); e.currentTarget.select(); onQuery?.('') }}
+        onChange={(e) => { setText(e.target.value); setOpen(true); setHi(0) }}
+        onBlur={() => window.setTimeout(() => { setOpen(false); if (allowCustom && text?.trim() && text.trim() !== value) onChange(text.trim()); setText(null) }, 150)}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown') { e.preventDefault(); setOpen(true); setHi((h) => Math.min(h + 1, items.length - 1)) }
+          else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => Math.max(h - 1, 0)) }
+          else if (e.key === 'Enter') { e.preventDefault(); if (items[hi]) pick(items[hi].value) }
+          else if (e.key === 'Escape') { setText(null); setOpen(false) }
+        }} />
+      {open && pos ? (
+        <ul role="listbox" aria-label={label} style={{ top: pos.top, left: pos.left, width: Math.max(pos.width, 256) }}
+          className="bg-popover text-popover-foreground fixed z-50 max-h-72 overflow-auto rounded-lg border p-1 shadow-md">
+          {items.length === 0 ? <li className="text-muted-foreground px-2 py-1.5 text-[13px]">{emptyText}</li> : null}
+          {items.map((o, i) => (
+            <li key={`${i}-${o.value}`} role="option" aria-selected={o.value === value}
+              onMouseDown={(e) => { e.preventDefault(); pick(o.value) }} onMouseEnter={() => setHi(i)}
+              className={cn('flex cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px]', i === hi && 'bg-muted', o.value === value && 'font-medium')}>
+              <span className="min-w-0 truncate">{o.label ?? o.value}{o.hint ? <span className="text-muted-foreground ml-2 font-mono text-xs">{o.hint}</span> : null}</span>
+              {o.badge}
+            </li>
+          ))}
+        </ul>
       ) : null}
-      {keys.some((k, i) => k && keys.indexOf(k) !== i) ? <p className="text-destructive text-xs">Duplicate {keyLabel.toLowerCase()}: only the last row is kept.</p> : null}
-      <div><Button variant="outline" size="sm" onClick={() => setRows([...rows, { k: '', v: '' }])}><PlusIcon aria-hidden />{addLabel}</Button></div>
     </div>
   )
 }

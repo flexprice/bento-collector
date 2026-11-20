@@ -36,7 +36,7 @@ func (Provider) Test(ctx context.Context, c source.Conn) (string, error) {
 	return "Connected to Prometheus " + v, nil
 }
 
-// evalTime: window mode evaluates [1d] ranges at the window end; usage_date
+// evalTime: window mode evaluates range queries at the window end; usage_date
 // queries select the day themselves and are evaluated now.
 func evalTime(in source.Input) time.Time {
 	if in.Collector.Source.Mode == spec.ModeUsageDate {
@@ -51,11 +51,11 @@ func (Provider) Stages(in source.Input) (source.Stages, error) {
 	if src.Mode == spec.ModeUsageDate {
 		at = "@now_unix"
 	}
-	build := fmt.Sprintf(`let q = %s.replace_all(%s, @usage_date)
+	build := fmt.Sprintf(`let q = %s
 let at = %s
 meta query = $q
 meta evaluated_at = $at
-root = %s`, blobl.Quote(src.Query), blobl.Quote(spec.UsageDatePlaceholder), at, formBody("$q", "$at"))
+root = %s`, withPlaceholders(src.Query), at, formBody("$q", "$at"))
 	return source.Stages{
 		Fetch: []any{
 			map[string]any{"label": "prometheus_request", "mapping": build},
@@ -71,15 +71,34 @@ root = %s`, blobl.Quote(src.Query), blobl.Quote(spec.UsageDatePlaceholder), at, 
 
 func (Provider) Gate(in source.Input, cp spec.Completeness) ([]any, error) {
 	return []any{map[string]any{"label": "completeness", "branch": map[string]any{
-		"request_map": "root = " + formBody(blobl.Quote(cp.Query), "@window_end_unix"),
+		"request_map": "root = " + formBody(withPlaceholders(cp.Query), "@window_end_unix"),
 		"processors":  []any{map[string]any{"http": httpProc(in)}},
 		// Same rules as Client.Query: warnings fail; scalar or vector values must all reach Min (NaN never does).
 		"result_map": fmt.Sprintf(`let r = this.data.result.or([])
 let vals = if this.data.resultType == "scalar" { [$r.index(1)] } else { $r.map_each(s -> s.value.index(1)) }
 meta collector_completeness = $vals
-meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this day" }
+meta collector_completeness_error = if this.status != "success" { "query failed: " + this.error.or("unknown error") } else if this.warnings.or([]).length() > 0 { "Prometheus returned warnings: " + this.warnings.join("; ") } else if $vals.length() == 0 { "the completeness query returned no data for this window" }
 meta collector_complete = this.status == "success" && this.warnings.or([]).length() == 0 && $vals.length() > 0 && $vals.all(v -> v.number().catch(0) >= %v)`, cp.Min),
 	}}}, nil
+}
+
+func (Provider) Sample(ctx context.Context, c source.Conn, in source.Input) ([]source.Sample, error) {
+	rows, err := client(c).Query(ctx, in.Collector.Source.QueryFor(in.Window), evalTime(in))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]source.Sample, len(rows))
+	for i, r := range rows {
+		out[i] = source.Sample{Labels: r.Labels, Value: r.Raw}
+	}
+	return out, nil
+}
+
+// withPlaceholders is the Bloblang for a query with the window placeholders
+// filled in from the window metadata.
+func withPlaceholders(query string) string {
+	return fmt.Sprintf(`%s.replace_all(%s, @usage_date).replace_all(%s, @window_length)`,
+		blobl.Quote(query), blobl.Quote(spec.UsageDatePlaceholder), blobl.Quote(spec.WindowPlaceholder))
 }
 
 // formBody is the Bloblang for an instant-query form body.

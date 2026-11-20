@@ -19,32 +19,41 @@ collector manages configs and Bento runs them. One image runs both processes.
 | Command | What it does |
 |---|---|
 | `collector serve [--addr :8090] [--streams DIR]` | UI + API. Publish writes `DIR/<id>.yaml` (default `<data>/streams`). There is no login: anyone who can reach the port can edit and publish collectors, so keep it internal or behind your own auth proxy |
-| `collector render --collector <id> [--version N] [--day YYYY-MM-DD]` | Prints the stream config publish writes, or with `--day` a one-off config for that day (backfill) |
+| `collector render --collector <id> [--version N] [--window START]` | Prints the stream config publish writes, or with `--window` (UTC `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`) a one-off config for that window (backfill) |
 | `bento-flexprice -w streams --no-api DIR` | Plain Bento: runs one stream per published collector and applies publish/unpublish without a restart |
 
-Common flags: `--connections` (`COLLECTOR_CONNECTIONS_FILE`, required, see below), `--data` (`COLLECTOR_DATA_DIR`) and `--git` (`COLLECTOR_GIT=true`: commit each save and publish).
+Common flags: `--connections` (`COLLECTOR_CONNECTIONS_FILE`, required, see below), `--data` (`COLLECTOR_DATA_DIR`) and `--git` (`COLLECTOR_GIT=true`: commit each save, publish and delete).
+
+## Setting up a collector
+
+| Step | What you set |
+|---|---|
+| Query | Prometheus connection, mode, window and PromQL. **Range** mode: the window is 1, 2, 3, 4, 6, 8, 12 or 24 hours (aligned to UTC) and `[__WINDOW__]` in the query becomes that range. **Dated snapshot**: the metric holds a total per day in a `usage_date` label; `__USAGE_DATE__` becomes the day. Sample runs the query over a From/To range (or one day for snapshots) to list its labels and values |
+| Map to events | The event name, picked from the Flexprice meters (the meter also sets the property the value is sent as). Event properties: only the properties you add are sent, each from a label of the query or a default value (name them after the meter's filters). Customer: a label whose value is sent as is as the external customer ID, or one fixed customer. To leave customers out, filter them in the PromQL. Timestamp: window start (default) or end |
+| Schedule | Derived from the window: e.g. every hour at :05 UTC, every 6 hours at :05, daily at 00:15. Optional completeness check |
+| Preview & save | Runs the rendered pipeline for one window against live Prometheus and checks Flexprice (meter, value property, filter properties, customers). Sends nothing. Save writes the next immutable version |
 
 ## Save, preview, publish
 
-| Step | What happens |
+| Action | What happens |
 |---|---|
-| Preview | Runs the rendered pipeline for a past day against live Prometheus and checks Flexprice (meter, customers). Sends nothing |
 | Save | Writes the next immutable version. Does not change what runs |
-| Publish vN | Checks Flexprice (the meter for the event name and every customer the spec names must exist, otherwise publish is refused), then atomically writes `<streams>/<id>.yaml`. Bento restarts that stream with vN |
+| Publish vN | Checks the meter exists and reads the value property (otherwise publish is refused), then atomically writes `<streams>/<id>.yaml`. Bento restarts that stream with vN |
 | Roll back | Publish an older version |
 | Unpublish | Deletes the stream file; Bento stops the stream |
-| Backfill | `collector render --collector <id> --day 2026-11-07 > day.yaml && bento-flexprice -c day.yaml` (same `event_id`s, so a day already sent is not double-billed) |
+| Delete | Unpublishes and removes every version |
+| Backfill | `collector render --collector <id> --window 2026-11-07T13:00 > w.yaml && bento-flexprice -c w.yaml` (same `event_id`s, so a window already sent is not double-billed) |
 
-## What a published collector does each day
+## What a published collector does each window
 
-At `trigger.schedule` (UTC; the cron `generate` input waits for its next tick, so publishing never triggers a run):
+At its schedule (UTC; publishing never triggers a run), for the newest window that closed at least the delay (5 minutes, 15 for daily windows) earlier:
 
-1. Completeness gate (optional): evaluates e.g. `count_over_time(dp_pod_reservation_rule_evaluated[1d]) / 1440` at the end of the previous day. Below the minimum → **nothing is sent** and Bento logs the error.
-2. Runs the PromQL at 00:00 UTC after the day (`window` mode) or with `__USAGE_DATE__` substituted (`usage_date` mode).
-3. Maps each series: customer from a fixed value, a label, or a label → customer table; required labels; dropped labels; extra properties. NaN/Inf/negative values, missing labels and unmapped tenants are **rejected** and logged; label values listed under "not billed" are **skipped**.
-4. Sends valid events in batches. `event_id` is a hash of collector, event name, customer, query, window and labels, and `timestamp` is the day's start, so a backfill of a day produces the same events.
+1. Completeness check (optional): below the minimum, **nothing is sent** for the window and Bento logs the error.
+2. Runs the PromQL at the window end (range mode) or with `__USAGE_DATE__` filled in (dated snapshot).
+3. Maps each row to one event: customer from the label value (or the fixed customer), the value under the meter's property, and the event properties you added. NaN/Inf/negative values, a missing customer label and a missing property label are **rejected** and logged. Customers that do not exist in Flexprice are still sent: Flexprice stores the events and bills them once the customer exists.
+4. Sends valid events in batches. `event_id` is a hash of collector, event name, customer, query, window and labels, and `timestamp` is the window start, so a backfill of a window produces the same events.
 
-Rejected or failed days are not replayed (`auto_replay_nacks: false`); fix the spec or data, publish, and backfill the day.
+Rejected or failed windows are not replayed (`auto_replay_nacks: false`); fix the spec or data, publish, and backfill the window.
 
 ## Connections
 
@@ -93,7 +102,7 @@ With `--git`, the data dir is a git repo and every save and publish is a commit,
 
 ## Not in this version
 
-Run history screen, cursor and missed-day alert (a tick missed while Bento is down is not caught up; alert on Bento's logs/metrics and backfill), approvals, collector-token config pull, managing connections or secrets in the UI, sources other than Prometheus.
+Run history, cursor and missed-window alert (a tick missed while Bento is down is not caught up; alert on Bento's logs/metrics and backfill), approvals, managing connections, secrets or meters in the UI, sources other than Prometheus.
 
 ## Code layout
 

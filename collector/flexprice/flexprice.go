@@ -25,7 +25,7 @@ func ValidateConnection(c spec.Connection) error {
 }
 
 // Output is the Bento flexprice output for a rendered config. Rejected rows
-// are logged and skipped rows dropped.
+// are logged.
 func Output(c spec.Connection, apiKey, collectorID string) (map[string]any, error) {
 	u, err := url.Parse(c.URL)
 	if err != nil {
@@ -42,7 +42,6 @@ func Output(c spec.Connection, apiKey, collectorID string) (map[string]any, erro
 	}
 	return map[string]any{"switch": map[string]any{"cases": []any{
 		map[string]any{"check": "errored()", "output": map[string]any{"reject": "collector " + collectorID + " rejected a row: ${! error() }"}},
-		map[string]any{"check": `@collector_skip == "true"`, "output": map[string]any{"drop": map[string]any{}}},
 		map[string]any{"output": map[string]any{"flexprice": fp}},
 	}}}, nil
 }

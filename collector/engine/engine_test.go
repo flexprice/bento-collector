@@ -6,6 +6,8 @@ import (
 
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +28,9 @@ type fakeFlexprice struct {
 	mu        sync.Mutex
 	customers map[string]bool
 	meters    map[string]bool
+	// field is what every meter aggregates; "value" when empty.
+	field   string
+	filters []map[string]any
 }
 
 func (f *fakeFlexprice) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,16 +41,23 @@ func (f *fakeFlexprice) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/v1/customers/external/"):
-		if !f.customers[strings.TrimPrefix(r.URL.Path, "/v1/customers/external/")] {
-			w.WriteHeader(http.StatusNotFound)
-			return
+	case r.URL.Path == "/v1/customers":
+		items := []map[string]any{}
+		for _, id := range r.URL.Query()["external_ids"] {
+			if f.customers[id] {
+				items = append(items, map[string]any{"external_id": id})
+			}
 		}
-		w.Write([]byte(`{}`))
+		json.NewEncoder(w).Encode(map[string]any{"items": items})
 	case r.URL.Path == "/v1/meters":
 		name := r.URL.Query().Get("event_name")
+		field := f.field
+		if field == "" {
+			field = "value"
+		}
 		if f.meters[name] {
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "m1", "event_name": name, "status": "published"}}})
+			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": "m1", "name": "Meter", "event_name": name, "status": "published",
+				"aggregation": map[string]any{"type": "SUM", "field": field}, "filters": f.filters}}})
 			return
 		}
 		w.Write([]byte(`{"items":[]}`))
@@ -110,7 +122,7 @@ const threeTenants = `[
 
 func TestPreviewScenarios(t *testing.T) {
 	day := spec.DayWindow(time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC))
-	known := map[string]bool{"cust_acme": true, "cust_globex": true}
+	known := map[string]bool{"trn_acme": true, "trn_globex": true}
 	meter := map[string]bool{"syncron_cpu_hours": true}
 
 	preview := func(t *testing.T, fp *fakeFlexprice, completeness string, edit func(*spec.Collector)) *Result {
@@ -140,27 +152,22 @@ func TestPreviewScenarios(t *testing.T) {
 
 	t.Run("maps valid rows and rejects the rest", func(t *testing.T) {
 		res := preview(t, &fakeFlexprice{customers: known, meters: meter}, "1", nil)
-		if res.Events != 2 || res.Rejected != 2 || res.OK || !res.Completeness.OK {
+		// The row missing instance is rejected.
+		if res.Events != 3 || res.Rejected != 1 || res.OK || !res.Completeness.OK {
 			t.Fatalf("events=%d rejected=%d ok=%v checks=%v", res.Events, res.Rejected, res.OK, res.Checks)
 		}
 		ev := events(res)[0]
-		if ev["timestamp"] != "2026-11-16T00:00:00Z" || ev["external_customer_id"] != "cust_acme" {
+		if ev["timestamp"] != "2026-11-16T00:00:00Z" || ev["external_customer_id"] != "trn_acme" {
 			t.Fatalf("unexpected event %v", ev)
 		}
 		props := ev["properties"].(map[string]any)
-		if props["value"] != "48" || props["unit"] != "core_hours" || props["product"] != "dataops" || props["instance"] != "dsi_a" {
+		// Only configured properties and the value are sent, not the query's labels.
+		if len(props) != 2 || props["value"] != "48" || props["product"] != "dataops" {
 			t.Fatalf("unexpected properties %v", props)
 		}
 		again := preview(t, &fakeFlexprice{customers: known, meters: meter}, "1", nil)
 		if events(again)[0]["event_id"] != ev["event_id"] {
 			t.Fatal("the same day must produce the same event_id")
-		}
-	})
-
-	t.Run("skipped tenants are counted, not rejected", func(t *testing.T) {
-		res := preview(t, &fakeFlexprice{customers: known, meters: meter}, "1", func(c *spec.Collector) { c.Mapping.Customer.Skip = []string{"trn_newco"} })
-		if res.Skipped != 1 || res.Rejected != 1 || res.Events != 2 {
-			t.Fatalf("skipped=%d rejected=%d events=%d", res.Skipped, res.Rejected, res.Events)
 		}
 	})
 
@@ -176,6 +183,43 @@ func TestPreviewScenarios(t *testing.T) {
 	t.Run("missing meter blocks", func(t *testing.T) {
 		if res := preview(t, &fakeFlexprice{customers: known, meters: map[string]bool{}}, "1", nil); res.OK {
 			t.Fatal("missing meter must block")
+		}
+	})
+
+	t.Run("a meter reading another property blocks", func(t *testing.T) {
+		if res := preview(t, &fakeFlexprice{customers: known, meters: meter, field: "cores"}, "1", nil); res.OK {
+			t.Fatalf("value sent as properties.value cannot feed a meter on cores: %v", res.Checks)
+		}
+	})
+
+	t.Run("label as customer, with a value property", func(t *testing.T) {
+		fp := &fakeFlexprice{customers: map[string]bool{"trn_acme": true}, meters: meter, field: "cores",
+			filters: []map[string]any{{"key": "dsi", "values": []string{"dsi_a"}}, {"key": "zone", "values": []string{"a"}}}}
+		res := preview(t, fp, "1", func(c *spec.Collector) {
+			c.Mapping.RequiredLabels = nil
+			c.Mapping.ValueProperty = "cores"
+			c.Mapping.PropertyLabels = map[string]string{"dsi": "instance"}
+		})
+		// The row without instance cannot carry the dsi filter, so it is rejected.
+		if res.Events != 3 || res.Rejected != 1 {
+			t.Fatalf("events=%d rejected=%d checks=%v", res.Events, res.Rejected, res.Checks)
+		}
+		got := map[string]map[string]any{}
+		for _, ev := range events(res) {
+			props := ev["properties"].(map[string]any)
+			got[ev["external_customer_id"].(string)+"/"+fmt.Sprint(props["dsi"])] = props
+		}
+		if p := got["trn_acme/dsi_a"]; p == nil || p["cores"] != "48" || p["value"] != nil || p["instance"] != nil {
+			t.Fatalf("value property or filter label not applied: %v", got)
+		}
+		var unknown, zone, dsi bool
+		for _, c := range res.Checks {
+			unknown = unknown || (c.Level == "warning" && strings.Contains(c.Message, "trn_globex"))
+			zone = zone || (c.Level == "warning" && strings.Contains(c.Message, "filters on zone"))
+			dsi = dsi || (c.Level == "warning" && strings.Contains(c.Message, "[dsi_b dsi_c]"))
+		}
+		if !unknown || !zone || !dsi {
+			t.Fatalf("unknown customers and an unmet meter filter warn without blocking: ok=%v %v", res.OK, res.Checks)
 		}
 	})
 
@@ -197,7 +241,7 @@ func TestPublishChecks(t *testing.T) {
 		blocked           bool
 	}{
 		"all customers and the meter exist": {map[string]bool{"cust_acme": true, "cust_globex": true}, map[string]bool{"syncron_cpu_hours": true}, false},
-		"a mapped customer is missing":      {map[string]bool{"cust_acme": true}, map[string]bool{"syncron_cpu_hours": true}, true},
+		"a mapped customer is missing":      {map[string]bool{"cust_acme": true}, map[string]bool{"syncron_cpu_hours": true}, false},
 		"no meter":                          {map[string]bool{"cust_acme": true, "cust_globex": true}, map[string]bool{}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -215,5 +259,51 @@ func TestPublishChecks(t *testing.T) {
 				t.Fatalf("publish must render the scheduled config with env placeholders:\n%s", y)
 			}
 		})
+	}
+}
+
+func TestHourlyPreview(t *testing.T) {
+	fps := httptest.NewServer(&fakeFlexprice{customers: map[string]bool{"cust_acme": true, "cust_globex": true}, meters: map[string]bool{"syncron_cpu_hours": true}})
+	defer fps.Close()
+	var queries []string
+	prom := fakePrometheus(t, "1", threeTenants)
+	defer prom.Close()
+	spy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		queries = append(queries, r.Form.Get("query")+" @ "+r.Form.Get("time"))
+		r.Body = http.NoBody
+		req, _ := http.NewRequest(r.Method, prom.URL+r.URL.Path+"?"+r.Form.Encode(), nil)
+		req.Header = r.Header
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+	defer spy.Close()
+	e, c := newTestEngine(t, spy.URL, fps.URL)
+	c.Trigger = spec.Trigger{Window: "1h", Delay: "5m"}
+	c.Source.Query = `sum by (label_tags_syncron_com_sy_tenant, instance) (sum_over_time(x[__WINDOW__])) / 60`
+	w := spec.WindowOf(time.Date(2026, 11, 16, 13, 0, 0, 0, time.UTC), time.Hour)
+	res, err := e.Preview(context.Background(), c, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 || queries[0] != `sum by (label_tags_syncron_com_sy_tenant, instance) (sum_over_time(x[1h])) / 60 @ 2026-11-16T14:00:00Z` {
+		t.Fatalf("query not evaluated for the hour: %v", queries)
+	}
+	for _, r := range res.Rows {
+		if r.Error == "" {
+			props := r.Event["properties"].(map[string]any)
+			if r.Event["timestamp"] != "2026-11-16T13:00:00Z" || props["value"] == nil {
+				t.Fatalf("unexpected hourly event %v", r.Event)
+			}
+		}
+	}
+	if res.Events != 3 {
+		t.Fatalf("events=%d checks=%v", res.Events, res.Checks)
 	}
 }
